@@ -29,7 +29,7 @@ const TRACKING_QUERY_PARAMS: &[&str] = &[
     "oly_anon_id",
     "_hsenc",
     "_hsmi",
-    "hsCtaTracking",
+    "hsctatracking",
     "rb_clickid",
     "vero_id",
     "wickedid",
@@ -40,8 +40,9 @@ const TRACKING_QUERY_PARAMS: &[&str] = &[
 
 /// Resolve a candidate article link (which may be relative or protocol-relative)
 /// against a base URL, validate that it is a safe HTTP/HTTPS URL, strip
-/// fragments and known tracking parameters, and sort remaining query parameters
-/// only in a conservative manner that preserves distinct article parameters.
+/// fragments, and remove known tracking query parameters while preserving raw
+/// query key/value text (including bare keys such as `?123`) when non-tracking
+/// parameters remain (fixes QUA-016).
 pub fn canonicalize_article_url(raw_link: &str, base_url: Option<&Url>) -> AppResult<String> {
     let trimmed = raw_link.trim();
     if trimmed.is_empty() {
@@ -84,27 +85,37 @@ pub fn canonicalize_article_url(raw_link: &str, base_url: Option<&Url>) -> AppRe
         let _ = validated.set_host(Some(stripped));
     }
 
-    // Conservatively remove known tracking parameters while preserving all other
-    // query parameters in their original order.
-    if validated.query().is_some() {
-        let kept_pairs: Vec<(String, String)> = validated
-            .query_pairs()
-            .filter(|(k, _)| {
-                let lower = k.to_ascii_lowercase();
-                !TRACKING_QUERY_PARAMS.contains(&lower.as_str())
-            })
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
+    // Conservatively remove known tracking parameters while preserving the exact
+    // raw representation of kept query segments (QUA-016).
+    if let Some(raw_query) = validated.query().map(str::to_string) {
+        let mut kept_segments: Vec<&str> = Vec::new();
+        let mut removed_any = false;
 
-        if kept_pairs.is_empty() {
-            validated.set_query(None);
-        } else {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            for (k, v) in kept_pairs {
-                serializer.append_pair(&k, &v);
+        for segment in raw_query.split('&') {
+            if segment.is_empty() {
+                continue;
             }
-            let new_query = serializer.finish();
-            validated.set_query(Some(&new_query));
+            let raw_key = segment.split('=').next().unwrap_or(segment);
+            let decoded_key = url::form_urlencoded::parse(raw_key.as_bytes())
+                .next()
+                .map(|(k, _)| k.into_owned())
+                .unwrap_or_else(|| raw_key.to_string())
+                .to_ascii_lowercase();
+
+            if TRACKING_QUERY_PARAMS.contains(&decoded_key.as_str()) {
+                removed_any = true;
+            } else {
+                kept_segments.push(segment);
+            }
+        }
+
+        if removed_any {
+            if kept_segments.is_empty() {
+                validated.set_query(None);
+            } else {
+                let rebuilt = kept_segments.join("&");
+                validated.set_query(Some(&rebuilt));
+            }
         }
     }
 

@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,9 +8,10 @@ use reqwest::StatusCode;
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::redirect::Policy;
 use thiserror::Error;
-use url::Url;
+use tokio::sync::watch;
+use url::{Host, Url};
 
-use crate::feeds::validation::{HostResolver, parse_and_validate_http_url};
+use crate::feeds::validation::{HostResolver, is_public_unicast, parse_and_validate_http_url};
 
 pub const USER_AGENT: &str = "Quire/0.2 (+https://github.com/spencerthayer/Quire)";
 
@@ -27,6 +29,7 @@ pub enum FetchErrorCategory {
     RateLimited,
     ResponseTooLarge,
     DecodeError,
+    Cancelled,
 }
 
 impl FetchErrorCategory {
@@ -44,17 +47,19 @@ impl FetchErrorCategory {
             FetchErrorCategory::RateLimited => "rate_limited",
             FetchErrorCategory::ResponseTooLarge => "response_too_large",
             FetchErrorCategory::DecodeError => "decode",
+            FetchErrorCategory::Cancelled => "cancelled",
         }
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 #[error("{message}")]
 pub struct FetchError {
     pub category: FetchErrorCategory,
     pub http_status: Option<u16>,
     pub message: String,
     pub retryable: bool,
+    pub retry_after: Option<Duration>,
 }
 
 impl FetchError {
@@ -69,7 +74,13 @@ impl FetchError {
             http_status,
             message: message.into(),
             retryable,
+            retry_after: None,
         }
+    }
+
+    pub fn with_retry_after(mut self, retry_after: Option<Duration>) -> Self {
+        self.retry_after = retry_after;
+        self
     }
 }
 
@@ -82,6 +93,11 @@ pub struct FetchRequestOptions {
     pub max_attempts: u32,
     pub retry_initial_backoff: Duration,
     pub retry_max_backoff: Duration,
+    /// When `true` (article extraction layer per Revision 2 §4.2), the HTTP layer
+    /// retries ONLY connection-reset / connect failures (at most 2 attempts, fixed
+    /// 1s delay) and returns timeouts, 5xx, 429, and DNS errors immediately to the
+    /// job layer (`retryable: true`) so retries are not multiplied across layers.
+    pub retry_connect_only: bool,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub accept_header: &'static str,
@@ -97,6 +113,7 @@ impl Default for FetchRequestOptions {
             max_attempts: 3,
             retry_initial_backoff: Duration::from_secs(2),
             retry_max_backoff: Duration::from_secs(30),
+            retry_connect_only: false,
             etag: None,
             last_modified: None,
             accept_header: "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
@@ -125,30 +142,96 @@ pub enum FetchOutcome {
 }
 
 /// Execute an SSRF-protected, DNS-pinned, redirect-validated, streaming-bounded
-/// HTTP GET request with bounded exponential backoff retries on transient failures.
+/// HTTP GET request with bounded retries.
 pub async fn fetch_url_with_retries(
     raw_url: &str,
     options: &FetchRequestOptions,
     resolver: &Arc<dyn HostResolver>,
 ) -> Result<FetchOutcome, FetchError> {
-    let max_attempts = options.max_attempts.max(1);
+    fetch_url_with_retries_cancellable(raw_url, options, resolver, None).await
+}
+
+pub async fn fetch_url_with_retries_cancellable(
+    raw_url: &str,
+    options: &FetchRequestOptions,
+    resolver: &Arc<dyn HostResolver>,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
+) -> Result<FetchOutcome, FetchError> {
+    let max_attempts = if options.retry_connect_only {
+        options.max_attempts.clamp(1, 2)
+    } else {
+        options.max_attempts.max(1)
+    };
     let mut last_err: Option<FetchError> = None;
 
     for attempt in 1..=max_attempts {
-        match execute_single_fetch(raw_url, options, resolver).await {
+        if cancel_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            return Err(FetchError::new(
+                FetchErrorCategory::Cancelled,
+                None,
+                "Request cancelled due to shutdown.",
+                true,
+            ));
+        }
+
+        let single_fut = execute_single_fetch(raw_url, options, resolver);
+        let single_res = if let Some(rx) = cancel_rx.as_mut() {
+            tokio::select! {
+                res = single_fut => res,
+                _ = rx.changed() => {
+                    return Err(FetchError::new(
+                        FetchErrorCategory::Cancelled,
+                        None,
+                        "Request cancelled due to shutdown.",
+                        true,
+                    ));
+                }
+            }
+        } else {
+            single_fut.await
+        };
+
+        match single_res {
             Ok((outcome, _retry_after)) => return Ok(outcome),
             Err((err, retry_after)) => {
-                if !err.retryable || attempt == max_attempts {
-                    return Err(err);
+                let err_with_ra = err.with_retry_after(retry_after);
+                let should_retry_at_http_layer = if options.retry_connect_only {
+                    err_with_ra.category == FetchErrorCategory::Connect && err_with_ra.retryable
+                } else {
+                    err_with_ra.retryable
+                };
+
+                if !should_retry_at_http_layer || attempt == max_attempts {
+                    return Err(err_with_ra);
                 }
-                let backoff = compute_backoff(
-                    attempt,
-                    options.retry_initial_backoff,
-                    options.retry_max_backoff,
-                    retry_after,
-                );
-                last_err = Some(err);
-                tokio::time::sleep(backoff).await;
+
+                let backoff = if options.retry_connect_only {
+                    Duration::from_secs(1)
+                } else {
+                    compute_backoff(
+                        attempt,
+                        options.retry_initial_backoff,
+                        options.retry_max_backoff,
+                        retry_after,
+                    )
+                };
+                last_err = Some(err_with_ra);
+
+                if let Some(rx) = cancel_rx.as_mut() {
+                    tokio::select! {
+                        () = tokio::time::sleep(backoff) => {}
+                        _ = rx.changed() => {
+                            return Err(FetchError::new(
+                                FetchErrorCategory::Cancelled,
+                                None,
+                                "Request cancelled due to shutdown.",
+                                true,
+                            ));
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(backoff).await;
+                }
             }
         }
     }
@@ -178,7 +261,6 @@ fn compute_backoff(
     if capped_ms == 0 {
         return Duration::from_millis(0);
     }
-    // Apply 0..25% jitter
     let jitter_max = (capped_ms / 4).max(1);
     let jitter = rand::rng().random_range(0..=jitter_max);
     Duration::from_millis((capped_ms + jitter).min(max_backoff.as_millis() as u64))
@@ -218,7 +300,7 @@ async fn execute_single_fetch(
         }
         let remaining_timeout = options.request_timeout.saturating_sub(elapsed);
 
-        let host = current_url.host_str().ok_or_else(|| {
+        let host_enum = current_url.host().ok_or_else(|| {
             (
                 FetchError::new(
                     FetchErrorCategory::Validation,
@@ -231,33 +313,118 @@ async fn execute_single_fetch(
         })?;
         let port = current_url.port_or_known_default().unwrap_or(80);
 
-        // Resolve via injectable HostResolver and enforce DNS rebinding / SSRF checks
-        let resolved_addrs = resolver.resolve(host, port).await.map_err(|e| {
-            let msg = e.to_string();
-            let (cat, retryable) = if msg.contains("restricted network address") {
-                (FetchErrorCategory::SsrfBlocked, false)
-            } else {
-                (FetchErrorCategory::Dns, true)
-            };
-            (FetchError::new(cat, None, msg, retryable), None)
-        })?;
+        let (resolved_addrs, domain_to_pin): (Vec<SocketAddr>, Option<String>) = match host_enum {
+            Host::Ipv4(v4) => {
+                let ip = std::net::IpAddr::V4(v4);
+                if !is_public_unicast(&ip) {
+                    return Err((
+                        FetchError::new(
+                            FetchErrorCategory::SsrfBlocked,
+                            None,
+                            format!("Target IP '{ip}' is not a public unicast address."),
+                            false,
+                        ),
+                        None,
+                    ));
+                }
+                (vec![SocketAddr::new(ip, port)], None)
+            }
+            Host::Ipv6(v6) => {
+                let ip = std::net::IpAddr::V6(v6);
+                if !is_public_unicast(&ip) {
+                    return Err((
+                        FetchError::new(
+                            FetchErrorCategory::SsrfBlocked,
+                            None,
+                            format!("Target IPv6 '{ip}' is not a public unicast address."),
+                            false,
+                        ),
+                        None,
+                    ));
+                }
+                (vec![SocketAddr::new(ip, port)], None)
+            }
+            Host::Domain(domain) => {
+                let resolve_res =
+                    tokio::time::timeout(remaining_timeout, resolver.resolve(domain, port))
+                        .await
+                        .map_err(|_| {
+                            (
+                                FetchError::new(
+                                    FetchErrorCategory::Timeout,
+                                    None,
+                                    format!(
+                                        "DNS resolution timed out for host '{domain}' after {}s.",
+                                        remaining_timeout.as_secs()
+                                    ),
+                                    true,
+                                ),
+                                None,
+                            )
+                        })?;
+
+                let addrs = resolve_res.map_err(|e| {
+                    let msg = e.to_string();
+                    let (cat, retryable) = if msg.contains("restricted network address") {
+                        (FetchErrorCategory::SsrfBlocked, false)
+                    } else {
+                        (FetchErrorCategory::Dns, true)
+                    };
+                    (FetchError::new(cat, None, msg, retryable), None)
+                })?;
+
+                if addrs.is_empty() {
+                    return Err((
+                        FetchError::new(
+                            FetchErrorCategory::Dns,
+                            None,
+                            format!("DNS resolution returned no addresses for '{domain}'."),
+                            true,
+                        ),
+                        None,
+                    ));
+                }
+
+                // Enforcement Point 2 (Revision 2 §5.4 / QUA-012):
+                // Validate every resolved IP inside the fetcher regardless of which
+                // HostResolver implementation returned it.
+                for addr in &addrs {
+                    if !is_public_unicast(&addr.ip())
+                        && !resolver.allows_test_fixture_addr(addr)
+                    {
+                        return Err((
+                            FetchError::new(
+                                FetchErrorCategory::SsrfBlocked,
+                                None,
+                                format!(
+                                    "Host '{domain}' resolved to restricted non-public address '{}'.",
+                                    addr.ip()
+                                ),
+                                false,
+                            ),
+                            None,
+                        ));
+                    }
+                }
+
+                (addrs, Some(domain.to_string()))
+            }
+        };
+
+        let remaining_after_dns = options
+            .request_timeout
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_millis(1));
 
         let mut client_builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .no_proxy()
             .redirect(Policy::none())
-            .connect_timeout(options.connect_timeout.min(remaining_timeout))
-            .timeout(remaining_timeout);
+            .connect_timeout(options.connect_timeout.min(remaining_after_dns))
+            .timeout(remaining_after_dns);
 
-        // Pin resolved socket addresses for hostname requests so the underlying
-        // TCP socket connects strictly to the verified IP addresses.
-        if host
-            .strip_prefix('[')
-            .and_then(|s| s.strip_suffix(']'))
-            .unwrap_or(host)
-            .parse::<std::net::IpAddr>()
-            .is_err()
-        {
-            client_builder = client_builder.resolve_to_addrs(host, &resolved_addrs);
+        if let Some(domain) = &domain_to_pin {
+            client_builder = client_builder.resolve_to_addrs(domain, &resolved_addrs);
         }
 
         let client = client_builder.build().map_err(|e| {
@@ -278,7 +445,6 @@ async fn execute_single_fetch(
             HeaderValue::from_static(options.accept_header),
         );
 
-        // Send conditional headers only on the initial hop or same-URL hop
         if redirect_count == 0 {
             if let Some(etag) = options.etag.as_deref().filter(|s| !s.trim().is_empty())
                 && let Ok(val) = HeaderValue::from_str(etag.trim())
@@ -301,6 +467,43 @@ async fn execute_single_fetch(
             .send()
             .await
             .map_err(|e| (classify_reqwest_error(e), None))?;
+
+        // Enforcement Point 4 (Revision 2 §5.4):
+        // Verify that the connected peer socket address matches one of the
+        // validated addresses for this hop and is a public unicast IP.
+        match response.remote_addr() {
+            Some(peer_addr) => {
+                let matches_validated = resolved_addrs
+                    .iter()
+                    .any(|a| a.ip() == peer_addr.ip() && a.port() == peer_addr.port());
+                let ip_allowed = is_public_unicast(&peer_addr.ip())
+                    || resolver.allows_test_fixture_addr(&peer_addr);
+                if !matches_validated || !ip_allowed {
+                    return Err((
+                        FetchError::new(
+                            FetchErrorCategory::SsrfBlocked,
+                            None,
+                            format!(
+                                "Connected peer address '{peer_addr}' did not match validated public destination."
+                            ),
+                            false,
+                        ),
+                        None,
+                    ));
+                }
+            }
+            None => {
+                return Err((
+                    FetchError::new(
+                        FetchErrorCategory::SsrfBlocked,
+                        None,
+                        "Connected response did not expose a verifiable peer address.",
+                        false,
+                    ),
+                    None,
+                ));
+            }
+        }
 
         let status = response.status();
         let status_code = status.as_u16();
@@ -358,9 +561,9 @@ async fn execute_single_fetch(
                 )
             })?;
 
-            // Validate redirect target against full URL + SSRF policy before following
-            let validated_next = parse_and_validate_http_url(joined.as_str(), "Redirect URL")
-                .map_err(|e| {
+            // Enforcement Point 3: Validate redirect target against full URL + SSRF policy
+            let validated_next =
+                parse_and_validate_http_url(joined.as_str(), "Redirect URL").map_err(|e| {
                     let msg = e.to_string();
                     let cat = if msg.contains("cannot target") || msg.contains("restricted") {
                         FetchErrorCategory::SsrfBlocked
@@ -401,12 +604,12 @@ async fn execute_single_fetch(
 
         let retry_after = parse_retry_after(&resp_headers);
 
-        if status == StatusCode::TOO_MANY_REQUESTS {
+        if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::REQUEST_TIMEOUT {
             return Err((
                 FetchError::new(
                     FetchErrorCategory::RateLimited,
                     Some(status_code),
-                    "HTTP 429 Too Many Requests.",
+                    format!("HTTP {status_code} response received."),
                     true,
                 ),
                 retry_after,
@@ -437,7 +640,6 @@ async fn execute_single_fetch(
             ));
         }
 
-        // Check Content-Length header early before streaming
         if let Some(cl) = response.content_length()
             && cl > options.max_response_bytes as u64
         {
@@ -460,7 +662,6 @@ async fn execute_single_fetch(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim().to_string());
 
-        // Stream chunks and enforce maximum byte limit incrementally
         let mut body = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk_res) = stream.next().await {
@@ -575,7 +776,7 @@ fn classify_reqwest_error(err: reqwest::Error) -> FetchError {
     )
 }
 
-fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+pub fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let val = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(secs) = val.parse::<u64>() {
         return Some(Duration::from_secs(secs));

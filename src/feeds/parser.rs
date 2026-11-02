@@ -38,22 +38,13 @@ pub struct ParsedFeedDocument {
     pub entries_truncated: usize,
 }
 
-/// Reject XML payloads containing `<!ENTITY` declarations to defend against
-/// XML External Entity (XXE) or Billion Laughs expansion before invoking `feed-rs`.
-fn reject_dangerous_xml_declarations(bytes: &[u8]) -> AppResult<()> {
-    let prefix_len = bytes.len().min(65_536);
-    let head = String::from_utf8_lossy(&bytes[..prefix_len]).to_ascii_uppercase();
-    if head.contains("<!ENTITY") || head.contains("SYSTEM \"FILE:") || head.contains("PUBLIC \"") {
-        return Err(AppError::Validation(
-            "Feed XML rejected: external entity or DTD declarations are not permitted.".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Parse an RSS 2.0, RSS 1.0/RDF, Atom 1.0, or JSON Feed document into normalized
-/// feed metadata and entries, applying `max_entries` truncation and skipping
-/// entries that lack a usable HTTP/HTTPS article URL.
+/// Parse an RSS 2.0, RSS 0.91/1.0/RDF, Atom 1.0, or JSON Feed document into normalized
+/// feed metadata and entries, sorting entries newest-first (by `published` / `updated`
+/// timestamp descending, preserving document order on ties or missing timestamps)
+/// before applying `max_entries` truncation (fixes QUA-005 and QUA-015).
+///
+/// Note on XML security: `feed-rs` uses `quick-xml`, which never fetches external
+/// DTDs and never expands custom or external `<!ENTITY>` declarations.
 pub fn parse_feed_bytes(
     raw_bytes: &[u8],
     content_type: Option<&str>,
@@ -65,8 +56,6 @@ pub fn parse_feed_bytes(
             "Feed response body is empty.".to_string(),
         ));
     }
-
-    reject_dangerous_xml_declarations(raw_bytes)?;
 
     // Decode non-UTF-8 feeds if Content-Type declares a specific charset.
     // Replace any XML header `encoding="..."` attribute with `encoding="UTF-8"`
@@ -114,12 +103,33 @@ pub fn parse_feed_bytes(
     };
 
     let entries_seen = feed.entries.len();
+
+    // Sort entries newest-first before applying `max_entries` so oldest-first feeds
+    // retain their newest items, while preserving original document order for ties
+    // or entries without dates (QUA-015).
+    let mut indexed_entries: Vec<(usize, Option<DateTime<Utc>>, Entry)> = feed
+        .entries
+        .into_iter()
+        .enumerate()
+        .map(|(idx, e)| {
+            let ts = e.published.or(e.updated);
+            (idx, ts, e)
+        })
+        .collect();
+
+    indexed_entries.sort_by(|(idx_a, ts_a, _), (idx_b, ts_b, _)| match (ts_a, ts_b) {
+        (Some(a), Some(b)) => b.cmp(a).then_with(|| idx_a.cmp(idx_b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => idx_a.cmp(idx_b),
+    });
+
     let entries_truncated = entries_seen.saturating_sub(max_entries);
 
     let mut entries = Vec::new();
     let mut entries_skipped = 0usize;
 
-    for entry in feed.entries.into_iter().take(max_entries) {
+    for (_idx, _ts, entry) in indexed_entries.into_iter().take(max_entries) {
         match normalize_entry(entry, &base_for_entries) {
             Some(normalized) => entries.push(normalized),
             None => entries_skipped += 1,
@@ -133,6 +143,21 @@ pub fn parse_feed_bytes(
         entries_skipped,
         entries_truncated,
     })
+}
+
+/// Async wrapper that offloads CPU-intensive feed XML parsing to `spawn_blocking`
+/// (fixes QUA-018).
+pub async fn parse_feed_bytes_async(
+    raw_bytes: Vec<u8>,
+    content_type: Option<String>,
+    feed_url: Url,
+    max_entries: usize,
+) -> AppResult<ParsedFeedDocument> {
+    tokio::task::spawn_blocking(move || {
+        parse_feed_bytes(&raw_bytes, content_type.as_deref(), &feed_url, max_entries)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Feed parser task panicked: {e}")))?
 }
 
 fn normalize_entry(entry: Entry, base_url: &Url) -> Option<NormalizedFeedEntry> {
@@ -217,7 +242,6 @@ fn select_entry_link(entry: &Entry) -> Option<String> {
     if let Some(any_link) = entry.links.iter().find(|l| !l.href.trim().is_empty()) {
         return Some(any_link.href.trim().to_string());
     }
-    // Some RSS feeds put a full URL inside <guid isPermaLink="true"> with no <link>
     let id_trimmed = entry.id.trim();
     if id_trimmed.starts_with("http://") || id_trimmed.starts_with("https://") {
         return Some(id_trimmed.to_string());

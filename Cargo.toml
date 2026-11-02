@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5"
 
 [dev-dependencies]
+flate2 = "1.1"
 http-body-util = "0.1"
 tempfile = "3.27"
 

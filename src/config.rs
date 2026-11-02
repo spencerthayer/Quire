@@ -976,9 +976,9 @@ pub fn validate_min_interval_minutes(raw: &str, label: &str) -> AppResult<u32> {
     let val = raw.trim().parse::<u32>().map_err(|_| {
         AppError::Validation(format!("{label} must be a positive integer in minutes."))
     })?;
-    if !(1..=DEFAULT_FETCH_MAX_INTERVAL_MINUTES).contains(&val) {
+    if !(DEFAULT_FETCH_MIN_INTERVAL_MINUTES..=DEFAULT_FETCH_MAX_INTERVAL_MINUTES).contains(&val) {
         return Err(AppError::Validation(format!(
-            "{label} must be between 1 and {DEFAULT_FETCH_MAX_INTERVAL_MINUTES} minutes."
+            "{label} must be between {DEFAULT_FETCH_MIN_INTERVAL_MINUTES} and {DEFAULT_FETCH_MAX_INTERVAL_MINUTES} minutes."
         )));
     }
     Ok(val)

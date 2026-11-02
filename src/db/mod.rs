@@ -1,24 +1,31 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use rand::Rng;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{FromRow, SqlitePool};
-use tracing::info;
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
+use tracing::{debug, info, warn};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardCounts {
     pub total_feeds: i64,
     pub enabled_feeds: i64,
+    pub due_feeds: i64,
     pub total_articles: i64,
     pub extracted_articles: i64,
     pub fallback_articles: i64,
     pub pending_extractions: i64,
+    pub processing_extractions: i64,
     pub failed_extractions: i64,
+    pub completed_extractions_24h: i64,
+    pub stuck_extractions: i64,
+    pub oldest_queued_age_seconds: Option<i64>,
     pub running_fetches: i64,
     pub total_editions: i64,
     pub last_ingestion_activity_at: Option<String>,
@@ -40,9 +47,106 @@ pub struct DbHealth {
     pub foreign_keys_enabled: bool,
 }
 
+/// Begin an immediate SQLite write transaction (`BEGIN IMMEDIATE`) managed by SQLx
+/// so dropping or cancelling the `Transaction` automatically rolls it back.
+pub async fn begin_immediate(pool: &SqlitePool) -> AppResult<Transaction<'static, Sqlite>> {
+    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+}
+
+/// Returns true if an `AppError` wraps a transient SQLite lock/busy error
+/// (`SQLITE_BUSY` = 5, `SQLITE_LOCKED` = 6, `SQLITE_BUSY_RECOVERY` = 261,
+/// `SQLITE_BUSY_SNAPSHOT` = 517).
+pub fn is_retryable_sqlite_busy(err: &AppError) -> bool {
+    if let AppError::Database(sqlx::Error::Database(db_err)) = err {
+        if let Some(code_cow) = db_err.code()
+            && let Ok(code_num) = code_cow.parse::<i64>()
+        {
+            let primary = code_num & 0xFF;
+            if primary == 5 || primary == 6 {
+                return true;
+            }
+        }
+        let msg = db_err.message().to_ascii_lowercase();
+        if msg.contains("database is locked") || msg.contains("database table is locked") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Execute a whole immediate SQLite transaction closure with bounded retries
+/// on `SQLITE_BUSY` / `SQLITE_LOCKED` (3 attempts total: initial + 250ms + 1000ms
+/// with ±20% jitter). Logs transaction duration (`tx_ms`) at `debug!` and `warn!`
+/// if a write transaction exceeds 2,000 ms.
+pub async fn with_write_retry<T, F>(pool: &SqlitePool, mut op: F) -> AppResult<T>
+where
+    F: for<'c> FnMut(
+        &'c mut Transaction<'static, Sqlite>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = AppResult<T>> + Send + 'c>>,
+{
+    const MAX_ATTEMPTS: u32 = 3;
+    const BASE_DELAYS_MS: [u64; 2] = [250, 1000];
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let started = Instant::now();
+        let begin_res = begin_immediate(pool).await;
+        let mut tx = match begin_res {
+            Ok(tx) => tx,
+            Err(err) => {
+                if attempt < MAX_ATTEMPTS && is_retryable_sqlite_busy(&err) {
+                    sleep_with_jitter(BASE_DELAYS_MS[(attempt - 1) as usize]).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        };
+
+        let body_res = op(&mut tx).await;
+        match body_res {
+            Ok(val) => match tx.commit().await.map_err(AppError::Database) {
+                Ok(()) => {
+                    let tx_ms = started.elapsed().as_millis() as u64;
+                    if tx_ms > 2_000 {
+                        warn!(tx_ms, attempt, "SQLite immediate transaction exceeded 2000ms budget");
+                    } else {
+                        debug!(tx_ms, attempt, "SQLite immediate transaction committed");
+                    }
+                    return Ok(val);
+                }
+                Err(commit_err) => {
+                    if attempt < MAX_ATTEMPTS && is_retryable_sqlite_busy(&commit_err) {
+                        sleep_with_jitter(BASE_DELAYS_MS[(attempt - 1) as usize]).await;
+                        continue;
+                    }
+                    return Err(commit_err);
+                }
+            },
+            Err(err) => {
+                // Dropping `tx` rolls back automatically, or we can roll back explicitly
+                let _ = tx.rollback().await;
+                if attempt < MAX_ATTEMPTS && is_retryable_sqlite_busy(&err) {
+                    sleep_with_jitter(BASE_DELAYS_MS[(attempt - 1) as usize]).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    unreachable!("with_write_retry loop always returns within MAX_ATTEMPTS")
+}
+
+async fn sleep_with_jitter(base_ms: u64) {
+    let min_ms = (base_ms * 80) / 100;
+    let max_ms = (base_ms * 120) / 100;
+    let delay_ms = rand::rng().random_range(min_ms..=max_ms);
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+}
+
 /// Initialize the SQLite connection pool with WAL mode and foreign keys enabled,
-/// create parent directories when using a file-backed database, and run embedded
-/// versioned SQLx migrations.
+/// create parent directories when using a file-backed database, run embedded
+/// versioned SQLx migrations, and verify `PRAGMA foreign_key_check` and
+/// `PRAGMA integrity_check`.
 pub async fn init_pool(database_url: &str, data_dir: &Path) -> AppResult<SqlitePool> {
     tokio::fs::create_dir_all(data_dir).await.map_err(|e| {
         anyhow::anyhow!(
@@ -77,9 +181,39 @@ pub async fn init_pool(database_url: &str, data_dir: &Path) -> AppResult<SqliteP
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
+
+    verify_database_integrity(&pool).await?;
+
     info!("SQLite database initialized and migrations applied");
 
     Ok(pool)
+}
+
+/// Verify `PRAGMA foreign_key_check` and `PRAGMA integrity_check` after running
+/// migrations.
+pub async fn verify_database_integrity(pool: &SqlitePool) -> AppResult<()> {
+    let fk_rows: Vec<(String, Option<i64>, String, Option<i64>)> =
+        sqlx::query_as("PRAGMA foreign_key_check")
+            .fetch_all(pool)
+            .await?;
+    if !fk_rows.is_empty() {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Database foreign_key_check failed with {} violation(s): {:?}",
+            fk_rows.len(),
+            fk_rows.first()
+        )));
+    }
+
+    let (integrity,): (String,) = sqlx::query_as("PRAGMA integrity_check")
+        .fetch_one(pool)
+        .await?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Database integrity_check failed: {integrity}"
+        )));
+    }
+
+    Ok(())
 }
 
 fn extract_sqlite_file_path(database_url: &str) -> Option<std::path::PathBuf> {
@@ -120,33 +254,81 @@ pub async fn get_dashboard_counts(pool: &SqlitePool) -> AppResult<DashboardCount
     let (enabled_feeds,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM feeds WHERE enabled = 1")
         .fetch_one(pool)
         .await?;
+    let (due_feeds,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM feeds
+         WHERE enabled = 1
+           AND fetch_in_progress = 0
+           AND (next_scheduled_fetch_at IS NULL OR next_scheduled_fetch_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+    )
+    .fetch_one(pool)
+    .await?;
     let (total_articles,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM articles")
         .fetch_one(pool)
         .await?;
     let (extracted_articles,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
-         FROM articles
-         WHERE extraction_status = 'extracted'
-           AND COALESCE(extracted_content_type, 'html') = 'html'",
+         FROM articles a
+         LEFT JOIN article_extraction_jobs j ON j.article_id = a.id
+         WHERE a.extracted_content_type = 'html'
+           AND a.extracted_content IS NOT NULL
+           AND a.extracted_content != ''
+           AND COALESCE(j.status, 'completed') = 'completed'",
     )
     .fetch_one(pool)
     .await?;
     let (fallback_articles,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
-         FROM articles
-         WHERE extraction_status = 'skipped'
-            OR COALESCE(extracted_content_type, '') = 'summary_fallback'",
+         FROM articles a
+         LEFT JOIN article_extraction_jobs j ON j.article_id = a.id
+         WHERE a.extracted_content_type = 'summary_fallback'
+           AND COALESCE(j.status, 'completed') IN ('completed', 'failed')",
     )
     .fetch_one(pool)
     .await?;
-    let (pending_extractions,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM articles WHERE extraction_status = 'pending'")
-            .fetch_one(pool)
-            .await?;
-    let (failed_extractions,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM articles WHERE extraction_status = 'failed'")
-            .fetch_one(pool)
-            .await?;
+    let (pending_extractions,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM article_extraction_jobs WHERE status = 'queued'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let (processing_extractions,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM article_extraction_jobs WHERE status = 'processing'",
+    )
+    .fetch_one(pool)
+    .await?;
+    let (failed_extractions,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM articles a
+         LEFT JOIN article_extraction_jobs j ON j.article_id = a.id
+         WHERE COALESCE(a.extracted_content_type, 'none') = 'none'
+           AND (j.status = 'failed' OR (j.id IS NULL AND a.extraction_status = 'failed'))",
+    )
+    .fetch_one(pool)
+    .await?;
+    let (completed_extractions_24h,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM article_extraction_jobs
+         WHERE status = 'completed'
+           AND completed_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let (stuck_extractions,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)
+         FROM article_extraction_jobs
+         WHERE status = 'processing'
+           AND claimed_at IS NOT NULL
+           AND claimed_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let (oldest_queued_age_seconds,): (Option<i64>,) = sqlx::query_as(
+        "SELECT CAST(strftime('%s', 'now') - strftime('%s', MIN(next_eligible_at)) AS INTEGER)
+         FROM article_extraction_jobs
+         WHERE status = 'queued'
+           AND next_eligible_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    )
+    .fetch_one(pool)
+    .await?;
     let (running_fetches,): (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM feeds WHERE fetch_in_progress = 1")
             .fetch_one(pool)
@@ -162,11 +344,16 @@ pub async fn get_dashboard_counts(pool: &SqlitePool) -> AppResult<DashboardCount
     Ok(DashboardCounts {
         total_feeds,
         enabled_feeds,
+        due_feeds,
         total_articles,
         extracted_articles,
         fallback_articles,
         pending_extractions,
+        processing_extractions,
         failed_extractions,
+        completed_extractions_24h,
+        stuck_extractions,
+        oldest_queued_age_seconds: oldest_queued_age_seconds.map(|s| s.max(0)),
         running_fetches,
         total_editions,
         last_ingestion_activity_at,

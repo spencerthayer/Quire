@@ -1950,6 +1950,7 @@ dependencies = [
  "encoding_rs",
  "epub-builder",
  "feed-rs",
+ "flate2",
  "futures-util",
  "http-body-util",
  "rand 0.9.5",
