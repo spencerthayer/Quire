@@ -1058,3 +1058,17 @@ Phase 2 keeps Phase 1's `CHECK (extraction_status IN ('pending','extracted','fai
 | `failed` | — | `failed` | `failed` |
 
 The dashboard counters (`db/mod.rs:116-174`) use the raw columns, not the logical status. They agree with the table above except that a `processing` article is counted under `pending` on the dashboard and shown as `processing` in the article list. This is cosmetic and not reported as a finding.
+
+---
+
+## Addendum — Finding identified during remediation-plan revision
+
+### QUA-023 — New and legacy articles are labelled as having HTML content before extraction
+
+- **Severity:** P3
+- **Confidence:** Confirmed (by code)
+- **Location:** `migrations/0002_feed_ingestion.sql:40` (`extracted_content_type TEXT NOT NULL DEFAULT 'html'`); `src/articles/mod.rs:331-356` (the `INSERT` does not set the column)
+- **Expected:** An article with no extracted content has a content type of `none`.
+- **Actual:** Every newly discovered article, and every Phase 1 row backfilled by `0002`, gets `extracted_content_type = 'html'` while `extracted_content IS NULL`. The UI masks this: `LOGICAL_STATUS_SQL` checks `extraction_status` first.
+- **Impact:** Any consumer that trusts `extracted_content_type` to identify full-text articles (the planned publication engine) would treat pending or failed articles as full text.
+- **Fix:** In the `INSERT`, set `'none'`. In a data migration, set `'none'` where the content is `NULL` or empty, and make `'none'` the column default in the next `articles` rebuild. Remediation plan Revision 2, §4.1 / Stage 6.
