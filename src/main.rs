@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use quire::config::AppConfig;
 use quire::db;
+use quire::feeds::scheduler::acquire_instance_lock;
 use quire::web::{AppState, create_router};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -26,6 +27,17 @@ async fn main() -> ExitCode {
     };
 
     init_logging(&config.log_level);
+
+    // Revision 2 §2.1: Acquire single-instance OS file lock on `/data/quire.lock`
+    // BEFORE running migrations or starting background workers.
+    let _instance_lock = match acquire_instance_lock(&config.data_dir) {
+        Ok(lock) => lock,
+        Err(err) => {
+            eprintln!("{err}");
+            error!(error = %err, "Single-instance lock acquisition failed");
+            return ExitCode::FAILURE;
+        }
+    };
 
     info!(
         version = quire::web::APP_VERSION,
@@ -59,7 +71,7 @@ async fn main() -> ExitCode {
     }
 
     let coordinator = state.coordinator.clone();
-    let scheduler_handle = coordinator.spawn_background_loop(Duration::from_secs(30));
+    let scheduler_handle = coordinator.spawn_background_loop(Duration::from_secs(5));
 
     let app = create_router(state);
 
@@ -82,8 +94,13 @@ async fn main() -> ExitCode {
         })
         .await;
 
-    // Wait up to 10 seconds for the background scheduler loop to finish active work
-    let _ = tokio::time::timeout(Duration::from_secs(10), scheduler_handle).await;
+    // Wait up to 6 seconds for both dispatchers to release cancelled items and join
+    let joined_cleanly = match tokio::time::timeout(Duration::from_secs(6), scheduler_handle).await
+    {
+        Ok(Ok(true)) => true,
+        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => false,
+    };
+
     pool.close().await;
 
     if let Err(err) = serve_res {
@@ -91,7 +108,11 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    info!("Quire shut down cleanly");
+    if joined_cleanly {
+        info!("shutdown complete");
+    } else {
+        warn!("shutdown timed out; items left for startup recovery");
+    }
     ExitCode::SUCCESS
 }
 

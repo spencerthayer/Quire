@@ -1,20 +1,92 @@
 #!/usr/bin/env bash
-# Build and start the local Quire container, then follow its logs.
+# Build and start the local Quire container (default or isolated review profile),
+# then follow its logs.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 
+profile="default"
+recreate=0
+no_build=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ./start [--profile default|review] [--recreate] [--no-build]
+
+Options:
+  --profile default|review   Target profile (default: "default").
+                             "default" -> project "quire", container "quire", volume "quire_quire_data".
+                             "review"  -> project "quirereview", container "quire-review", volume "quirereview_quire_data", port 18080.
+  --recreate                 Force container recreation (--force-recreate).
+  --no-build                 Skip image build (--no-build).
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --profile requires a profile name (default or review)." >&2
+        usage
+        exit 1
+      fi
+      profile="$2"
+      shift 2
+      ;;
+    --profile=*)
+      profile="${1#*=}"
+      shift
+      ;;
+    --recreate)
+      recreate=1
+      shift
+      ;;
+    --no-build)
+      no_build=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'." >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+case "$profile" in
+  default|review) ;;
+  *)
+    echo "Error: unsupported profile '${profile}'. Allowed profiles: default, review." >&2
+    exit 1
+    ;;
+esac
+
 env_file="${root}/.env"
 log_dir="${root}/_logs"
-pid_file="${log_dir}/log-follow.pid"
 
-if [[ ! -f "$env_file" ]]; then
-  echo "Missing .env. Copy .env.example to .env, then run ./start again." >&2
-  exit 1
+if [[ "$profile" == "default" ]]; then
+  if [[ ! -f "$env_file" ]]; then
+    echo "Missing .env. Copy .env.example to .env, then run ./start again." >&2
+    exit 1
+  fi
+  project_name="quire"
+  container_name="quire"
+  pid_file="${log_dir}/log-follow.pid"
+  latest_link="${log_dir}/latest.log"
+else
+  project_name="quirereview"
+  container_name="quire-review"
+  pid_file="${log_dir}/log-follow-review.pid"
+  latest_link="${log_dir}/latest-review.log"
 fi
 
 load_env() {
+  [[ ! -f "$env_file" ]] && return 0
   local line key value
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*$ ]] && continue
@@ -54,7 +126,13 @@ stop_log_follow() {
   rm -f "$pid_file"
 }
 
-load_env
+if [[ "$profile" == "default" ]]; then
+  load_env
+  host_port="${QUIRE_PORT:-8080}"
+else
+  host_port="${QUIRE_REVIEW_PORT:-18080}"
+fi
+
 mkdir -p "$log_dir"
 stop_log_follow
 
@@ -64,38 +142,75 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "$override" <<EOF
+if [[ "$profile" == "default" ]]; then
+  cat > "$override" <<EOF
 services:
   quire:
     env_file:
       - "${env_file}"
 EOF
+else
+  cat > "$override" <<EOF
+services:
+  quire:
+    container_name: quire-review
+    image: ${QUIRE_REVIEW_IMAGE:-quire:review}
+    environment:
+      QUIRE_FETCH_ENABLED: "${QUIRE_REVIEW_FETCH_ENABLED:-false}"
+      QUIRE_TIMEZONE: "${QUIRE_REVIEW_TIMEZONE:-America/Los_Angeles}"
+    ports: !override
+      - "${host_port}:8080"
+EOF
+fi
 
-docker compose \
-  --env-file "$env_file" \
-  --project-directory "$root" \
-  -f "${root}/compose.yaml" \
-  -f "$override" \
-  up -d --build
+up_flags=(-d)
+if [[ "$no_build" -eq 1 ]]; then
+  up_flags+=(--no-build)
+else
+  up_flags+=(--build)
+fi
+if [[ "$recreate" -eq 1 ]]; then
+  up_flags+=(--force-recreate)
+fi
+
+compose_cmd=(
+  docker compose
+  -p "$project_name"
+  --project-directory "$root"
+  -f "${root}/compose.yaml"
+  -f "$override"
+)
+if [[ "$profile" == "default" && -f "$env_file" ]]; then
+  compose_cmd=(
+    docker compose
+    -p "$project_name"
+    --env-file "$env_file"
+    --project-directory "$root"
+    -f "${root}/compose.yaml"
+    -f "$override"
+  )
+fi
+
+"${compose_cmd[@]}" up "${up_flags[@]}"
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-logfile="${log_dir}/quire-${stamp}.log"
+logfile="${log_dir}/${container_name}-${stamp}.log"
 
 {
-  echo "# quire container logs"
+  echo "# ${container_name} container logs (profile: ${profile})"
   echo "# started_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "# container: quire"
+  echo "# project: ${project_name}"
+  echo "# container: ${container_name}"
   echo
 } > "$logfile"
 
-nohup docker logs -f --timestamps quire >> "$logfile" 2>&1 &
+nohup docker logs -f --timestamps "$container_name" >> "$logfile" 2>&1 &
 echo $! > "$pid_file"
 disown || true
 
-ln -sfn "$(basename "$logfile")" "${log_dir}/latest.log"
+ln -sfn "$(basename "$logfile")" "$latest_link"
 
-port="${QUIRE_PORT:-8080}"
-echo "Container quire is up."
-echo "UI: http://localhost:${port}"
+echo "Container ${container_name} (profile: ${profile}, project: ${project_name}) is up."
+echo "UI: http://localhost:${host_port}"
 echo "Logs: ${logfile}"
-echo "Latest: ${log_dir}/latest.log"
+echo "Latest: ${latest_link}"

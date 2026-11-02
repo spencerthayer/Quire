@@ -235,6 +235,7 @@ impl IngestionCoordinator {
                     article_id: job.article_id,
                     claim_token: job.claim_token.clone(),
                 };
+                let meta_for_map = meta.clone();
                 let coord = self.clone();
                 let cfg_clone = rt_cfg.clone();
                 let abort_handle: AbortHandle = active.spawn(async move {
@@ -243,19 +244,7 @@ impl IngestionCoordinator {
                         .await;
                     (meta, reason)
                 });
-                active_meta.insert(
-                    abort_handle.id(),
-                    ActiveExtractionMeta {
-                        job_id: 0,
-                        article_id: 0,
-                        claim_token: String::new(),
-                    },
-                );
-                // Re-insert accurate meta keyed by task ID
-                if let Some(entry) = active_meta.get_mut(&abort_handle.id()) {
-                    // We already moved `meta` into the task; keep a copy before spawn
-                    let _ = entry;
-                }
+                active_meta.insert(abort_handle.id(), meta_for_map);
             }
 
             if active.is_empty() {
@@ -734,8 +723,6 @@ impl IngestionCoordinator {
             default_interval_minutes: rt_cfg.fetch_interval_minutes,
         };
         let reason = self.run_feed_with_deadline(feed, run_id, rt_cfg).await;
-        let mut dummy = HashMap::new();
-        // Fake a completed join to reuse release handling when invoked directly
         if reason != TaskEndReason::CompletedNormally {
             let _ = match reason {
                 TaskEndReason::CancelledByShutdown => {
@@ -777,7 +764,6 @@ impl IngestionCoordinator {
                 TaskEndReason::CompletedNormally => Ok(true),
             };
         }
-        let _ = &mut dummy;
     }
 
     async fn execute_claimed_feed_fetch_inner(

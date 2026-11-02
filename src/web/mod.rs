@@ -826,6 +826,7 @@ struct ArticleDetailTemplate {
     published_display: String,
     discovered_display: String,
     last_attempt_display: String,
+    next_retry_display: String,
     sources: Vec<ArticleFeedSourceRow>,
     csrf_token: String,
     flash_message: Option<String>,
@@ -843,12 +844,23 @@ async fn article_detail_page(
     let sources = articles::list_article_sources(&state.db, id).await?;
 
     let base_url = Url::parse(&article.canonical_url).ok();
-    // Re-sanitize stored HTML at render time as defense-in-depth before `|safe`
-    let sanitized_body_html = article
+    // Re-sanitize stored HTML at render time on the blocking pool (QUA-018)
+    let sanitized_body_html = if let Some(raw_html) = article
         .extracted_content
         .as_deref()
         .filter(|s| !s.trim().is_empty())
-        .map(|raw| sanitize_article_html(raw, base_url.as_ref()));
+        .map(str::to_string)
+    {
+        let base_clone = base_url.clone();
+        let cleaned = tokio::task::spawn_blocking(move || {
+            sanitize_article_html(&raw_html, base_clone.as_ref())
+        })
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Sanitizer task panicked: {e}")))?;
+        Some(cleaned)
+    } else {
+        None
+    };
 
     let published_display = article
         .published_at
@@ -861,6 +873,11 @@ async fn article_detail_page(
         .as_deref()
         .map(|ts| format_timestamp_for_tz(ts, &rt_cfg.timezone))
         .unwrap_or_else(|| "Never".to_string());
+    let next_retry_display = article
+        .next_extraction_retry_at
+        .as_deref()
+        .map(|ts| format_timestamp_for_tz(ts, &rt_cfg.timezone))
+        .unwrap_or_else(|| "Not scheduled".to_string());
 
     let tpl = ArticleDetailTemplate {
         app_version: APP_VERSION,
@@ -870,6 +887,7 @@ async fn article_detail_page(
         published_display,
         discovered_display,
         last_attempt_display,
+        next_retry_display,
         sources,
         csrf_token,
         flash_message: map_flash_code(query.msg.as_deref()),
@@ -1439,15 +1457,17 @@ fn map_flash_code(code: Option<&str>) -> Option<String> {
         Some("updated") => Some("Feed updated.".to_string()),
         Some("toggled") => Some("Feed status updated.".to_string()),
         Some("deleted") => Some("Feed deleted.".to_string()),
-        Some("fetch_started") => Some("Manual feed fetch started in the background.".to_string()),
+        Some("fetch_started") => {
+            Some("Manual feed fetch request accepted and queued.".to_string())
+        }
         Some("fetch_already_running") => {
             Some("A fetch is already running for this feed.".to_string())
         }
         Some("fetch_all_started") => {
-            Some("Triggered background fetches for all enabled feeds.".to_string())
+            Some("Manual fetch request accepted for all enabled feeds.".to_string())
         }
         Some("extraction_queued") => {
-            Some("Article content extraction queued and started.".to_string())
+            Some("Article content extraction queued.".to_string())
         }
         Some("extraction_already_running") => {
             Some("Article extraction is already in progress.".to_string())

@@ -99,6 +99,14 @@ impl HostResolver for FixtureResolver {
             Ok(addrs)
         })
     }
+
+    fn allows_test_fixture_addr(&self, addr: &SocketAddr) -> bool {
+        if self.enforce_ip_check_on_routes {
+            false
+        } else {
+            self.routes.values().flatten().any(|a| a == addr)
+        }
+    }
 }
 
 async fn setup_test_state() -> (TempDir, AppState) {
@@ -588,6 +596,7 @@ async fn test_http_fetching_conditional_redirects_retries_and_limits() {
         max_attempts: 3,
         retry_initial_backoff: Duration::from_millis(10),
         retry_max_backoff: Duration::from_millis(50),
+        retry_connect_only: false,
         etag: None,
         last_modified: None,
         accept_header: "*/*",
@@ -866,7 +875,7 @@ async fn test_deduplication_guid_changes_and_cross_feed_safe_deletion() {
         remaining[0].canonical_url,
         "https://shared.example.com/story-1"
     );
-    assert_eq!(remaining[0].feed_id, feed_b.id);
+    assert_eq!(remaining[0].feed_id, Some(feed_b.id));
 }
 
 // =============================================================================
@@ -1039,6 +1048,9 @@ async fn test_persistent_extraction_queue_recovery_and_retry_schedule() {
         &ExtractionResult::Failed {
             error_message: "Temporary timeout".to_string(),
             retryable: true,
+            retry_after: None,
+            interim_fallback: None,
+            cancelled: false,
         },
     )
     .await

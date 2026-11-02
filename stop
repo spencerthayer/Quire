@@ -1,13 +1,87 @@
 #!/usr/bin/env bash
-# Stop the local Quire container and its log follower.
+# Stop the local Quire container (default or isolated review profile) and its log follower.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$root"
 
+profile="default"
+purge=0
+keep_container=0
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: ./stop [--profile default|review] [--purge] [--keep-container]
+
+Options:
+  --profile default|review   Target profile (default: "default").
+  --purge                    Remove container AND delete the isolated review volume
+                             (ONLY allowed with --profile review; forbidden on default).
+  --keep-container           Stop the container (`docker compose stop`) without removing it
+                             (useful before `docker cp` inspection in review scripts).
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --profile requires a profile name (default or review)." >&2
+        usage
+        exit 1
+      fi
+      profile="$2"
+      shift 2
+      ;;
+    --profile=*)
+      profile="${1#*=}"
+      shift
+      ;;
+    --purge)
+      purge=1
+      shift
+      ;;
+    --keep-container)
+      keep_container=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument '$1'." >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+case "$profile" in
+  default|review) ;;
+  *)
+    echo "Error: unsupported profile '${profile}'. Allowed profiles: default, review." >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$purge" -eq 1 && "$profile" != "review" ]]; then
+  echo "Error: --purge is strictly forbidden on the '${profile}' profile to protect default data." >&2
+  exit 1
+fi
+
 log_dir="${root}/_logs"
-pid_file="${log_dir}/log-follow.pid"
 env_file="${root}/.env"
+
+if [[ "$profile" == "default" ]]; then
+  project_name="quire"
+  container_name="quire"
+  pid_file="${log_dir}/log-follow.pid"
+else
+  project_name="quirereview"
+  container_name="quire-review"
+  pid_file="${log_dir}/log-follow-review.pid"
+fi
 
 if [[ -f "$pid_file" ]]; then
   pid="$(cat "$pid_file")"
@@ -24,15 +98,48 @@ if [[ -f "$pid_file" ]]; then
   rm -f "$pid_file"
 fi
 
+override="$(mktemp)"
+cleanup() {
+  rm -f "$override"
+}
+trap cleanup EXIT
+
+if [[ "$profile" == "default" ]]; then
+  cat > "$override" <<EOF
+services: {}
+EOF
+else
+  cat > "$override" <<EOF
+services:
+  quire:
+    container_name: quire-review
+    image: ${QUIRE_REVIEW_IMAGE:-quire:review}
+EOF
+fi
+
 compose_args=(
+  -p "$project_name"
   --project-directory "$root"
   -f "${root}/compose.yaml"
+  -f "$override"
 )
-if [[ -f "$env_file" ]]; then
+if [[ "$profile" == "default" && -f "$env_file" ]]; then
   compose_args=(--env-file "$env_file" "${compose_args[@]}")
 fi
 
-docker compose "${compose_args[@]}" down
-
-echo "Container quire is stopped."
+if [[ "$keep_container" -eq 1 ]]; then
+  docker compose "${compose_args[@]}" stop
+  echo "Container ${container_name} (profile: ${profile}) is stopped (container kept)."
+elif [[ "$purge" -eq 1 ]]; then
+  # Double-check project name before destructive volume removal
+  if [[ "$project_name" != "quirereview" ]]; then
+    echo "Error: refusing --purge for project '${project_name}'." >&2
+    exit 1
+  fi
+  docker compose "${compose_args[@]}" down -v
+  echo "Container ${container_name} and volume quirereview_quire_data purged."
+else
+  docker compose "${compose_args[@]}" down
+  echo "Container ${container_name} (profile: ${profile}) is stopped."
+fi
 echo "Logs remain in ${log_dir}"

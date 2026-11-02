@@ -14,22 +14,30 @@
     <div class="stat-card">
         <div class="stat-label">Configured Feeds</div>
         <div class="stat-value">{{ counts.total_feeds }}</div>
-        <div class="stat-meta">{{ counts.enabled_feeds }} enabled &middot; {{ counts.running_fetches }} running</div>
+        <div class="stat-meta">{{ counts.enabled_feeds }} enabled &middot; {{ counts.due_feeds }} due &middot; {{ counts.running_fetches }} running</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Stored Articles</div>
         <div class="stat-value">{{ counts.total_articles }}</div>
-        <div class="stat-meta">{{ counts.extracted_articles }} extracted &middot; {{ counts.fallback_articles }} fallback</div>
+        <div class="stat-meta">{{ counts.extracted_articles }} full text &middot; {{ counts.fallback_articles }} summary only</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Extraction Queue</div>
         <div class="stat-value">{{ counts.pending_extractions }}</div>
-        <div class="stat-meta">Pending / processing &middot; {{ counts.failed_extractions }} failed</div>
+        <div class="stat-meta">{{ counts.processing_extractions }} processing &middot; {{ counts.failed_extractions }} failed</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Generated Editions</div>
-        <div class="stat-value">{{ counts.total_editions }}</div>
-        <div class="stat-meta">Publications archive</div>
+        <div class="stat-label">24h Throughput</div>
+        <div class="stat-value">{{ counts.completed_extractions_24h }}</div>
+        <div class="stat-meta">
+            {% match counts.oldest_queued_age_seconds %}
+            {% when Some with (age) %}
+            Oldest queued: {{ age }}s
+            {% when None %}
+            Queue caught up
+            {% endmatch %}
+            &middot; {{ counts.stuck_extractions }} stuck
+        </div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Database Status</div>

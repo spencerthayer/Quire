@@ -248,9 +248,11 @@ pub async fn persist_discovered_entries(
         return Ok(PersistBatchStats::default());
     }
 
+    let entries_owned = entries.to_vec();
     with_write_retry(pool, |tx| {
+        let batch = entries_owned.clone();
         Box::pin(async move {
-            persist_discovered_entries_in_tx(tx, feed_id, entries, max_attempts).await
+            persist_discovered_entries_in_tx(tx, feed_id, &batch, max_attempts).await
         })
     })
     .await
@@ -823,7 +825,11 @@ pub async fn complete_extraction_job(
     job: &ClaimedExtractionJob,
     outcome: &extractor::ExtractionResult,
 ) -> AppResult<bool> {
+    let job_owned = job.clone();
+    let outcome_owned = outcome.clone();
     with_write_retry(pool, |tx| {
+        let job = job_owned.clone();
+        let outcome = outcome_owned.clone();
         Box::pin(async move {
             let now = Utc::now();
             let now_str = now.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -942,7 +948,7 @@ pub async fn complete_extraction_job(
                          WHERE id = ? AND claim_token = ? AND status = 'processing'",
                     )
                     .bind(&now_str)
-                    .bind(reason)
+                    .bind(&reason)
                     .bind(&now_str)
                     .bind(job.job_id)
                     .bind(&job.claim_token)
@@ -973,9 +979,9 @@ pub async fn complete_extraction_job(
                              updated_at = ?
                          WHERE id = ?",
                     )
-                    .bind(sanitized_html)
-                    .bind(content_hash)
-                    .bind(reason)
+                    .bind(&sanitized_html)
+                    .bind(&content_hash)
+                    .bind(&reason)
                     .bind(&now_str)
                     .bind(job.article_id)
                     .execute(&mut **tx)
@@ -1016,7 +1022,7 @@ pub async fn complete_extraction_job(
                         .await?;
                     }
 
-                    if *retryable && job.attempts < job.max_attempts {
+                    if retryable && job.attempts < job.max_attempts {
                         let exp_secs =
                             15i64.saturating_mul(2i64.saturating_pow(job.attempts as u32));
                         let ra_secs = retry_after.map(|d| d.as_secs() as i64).unwrap_or(0);
@@ -1035,7 +1041,7 @@ pub async fn complete_extraction_job(
                              WHERE id = ? AND claim_token = ? AND status = 'processing'",
                         )
                         .bind(&next_retry)
-                        .bind(error_message)
+                        .bind(&error_message)
                         .bind(&now_str)
                         .bind(job.job_id)
                         .bind(&job.claim_token)
@@ -1053,7 +1059,7 @@ pub async fn complete_extraction_job(
                                  updated_at = ?
                              WHERE id = ?",
                         )
-                        .bind(error_message)
+                        .bind(&error_message)
                         .bind(&next_retry)
                         .bind(&now_str)
                         .bind(job.article_id)
@@ -1070,7 +1076,7 @@ pub async fn complete_extraction_job(
                              WHERE id = ? AND claim_token = ? AND status = 'processing'",
                         )
                         .bind(&now_str)
-                        .bind(error_message)
+                        .bind(&error_message)
                         .bind(&now_str)
                         .bind(job.job_id)
                         .bind(&job.claim_token)
@@ -1088,7 +1094,7 @@ pub async fn complete_extraction_job(
                                  updated_at = ?
                              WHERE id = ?",
                         )
-                        .bind(error_message)
+                        .bind(&error_message)
                         .bind(&now_str)
                         .bind(job.article_id)
                         .execute(&mut **tx)

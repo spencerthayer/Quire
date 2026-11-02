@@ -7,7 +7,13 @@
     <div>
         <h1>{{ article.title }}</h1>
         <p>
-            From <a href="/feeds/{{ article.feed_id }}"><strong>{{ article.feed_name }}</strong></a>
+            From
+            {% match article.feed_id %}
+            {% when Some with (fid) %}
+            <a href="/feeds/{{ fid }}"><strong>{{ article.feed_name }}</strong></a>
+            {% when None %}
+            <strong>{{ article.feed_name }}</strong>
+            {% endmatch %}
             {% match article.author %}
             {% when Some with (author) %}
             &middot; By {{ author }}
@@ -20,7 +26,7 @@
         <form class="inline-form" method="post" action="/articles/{{ article.id }}/extract">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="btn btn-primary" type="submit" {% if article.extraction_status == "processing" %}disabled{% endif %}>
-                {% if article.extraction_status == "failed" %}
+                {% if article.extraction_status == "failed" || article.extracted_content_type != "html" %}
                 Retry Extraction
                 {% else if article.extraction_status == "processing" %}
                 Extracting...
@@ -40,16 +46,25 @@
 {% when None %}
 {% endmatch %}
 
-{% if article.extraction_status == "fallback" %}
+{% if article.display_state == "Summary (full text pending)" %}
 <div class="alert alert-warning" role="status">
-    <strong>Fallback Content:</strong> Full-text extraction could not be completed; displaying the sanitized RSS/Atom summary instead.
+    <strong>Summary (full text pending):</strong> Displaying the sanitized RSS/Atom summary while full-text extraction is scheduled for retry.
+    {% match article.extraction_error %}
+    {% when Some with (err) %}
+    <div class="mono" style="margin-top: 0.35rem;">Last attempt error: {{ err }}</div>
+    {% when None %}
+    {% endmatch %}
+</div>
+{% else if article.display_state == "Summary only" %}
+<div class="alert alert-warning" role="status">
+    <strong>Summary only:</strong> Full-text extraction could not be completed; displaying the sanitized RSS/Atom summary instead.
     {% match article.extraction_error %}
     {% when Some with (err) %}
     <div class="mono" style="margin-top: 0.35rem;">Reason: {{ err }}</div>
     {% when None %}
     {% endmatch %}
 </div>
-{% else if article.extraction_status == "failed" %}
+{% else if article.display_state == "Failed" %}
 <div class="alert alert-error" role="alert">
     <strong>Extraction Failed:</strong>
     {% match article.extraction_error %}
@@ -59,14 +74,14 @@
     <span>Unable to extract full article content.</span>
     {% endmatch %}
 </div>
-{% else if article.extraction_status == "pending" || article.extraction_status == "processing" %}
+{% else if article.display_state == "Pending" || article.display_state == "Extracting" %}
 <div class="alert alert-warning" role="status">
-    Article extraction is currently <strong>{{ article.extraction_status }}</strong>. <a href="/articles/{{ article.id }}">Refresh this page</a> shortly.
+    Article extraction state is currently <strong>{{ article.display_state }}</strong>. <a href="/articles/{{ article.id }}">Refresh this page</a> shortly.
 </div>
 {% endif %}
 
 <div class="card">
-    <h2>Extracted Article Content</h2>
+    <h2>Article Content ({{ article.display_state }})</h2>
     {% match sanitized_body_html %}
     {% when Some with (html) %}
     <article class="article-reader">
@@ -88,18 +103,18 @@
                 <td class="mono"><a href="{{ article.canonical_url }}" target="_blank" rel="noopener noreferrer">{{ article.canonical_url }}</a></td>
             </tr>
             <tr>
-                <th>Extraction Status</th>
+                <th>Content &amp; Extraction State</th>
                 <td>
-                    {% if article.extraction_status == "completed" %}
-                    <span class="badge badge-enabled">completed</span>
-                    {% else if article.extraction_status == "fallback" %}
-                    <span class="badge badge-env">fallback (summary)</span>
-                    {% else if article.extraction_status == "failed" %}
-                    <span class="badge badge-danger">failed</span>
+                    {% if article.display_state == "Full text" || article.display_state == "Full text (refreshing)" %}
+                    <span class="badge badge-enabled">{{ article.display_state }}</span>
+                    {% else if article.display_state == "Summary only" || article.display_state == "Summary (full text pending)" %}
+                    <span class="badge badge-env">{{ article.display_state }}</span>
+                    {% else if article.display_state == "Failed" %}
+                    <span class="badge badge-danger">{{ article.display_state }}</span>
                     {% else %}
-                    <span class="badge badge-disabled">{{ article.extraction_status }}</span>
+                    <span class="badge badge-disabled">{{ article.display_state }}</span>
                     {% endif %}
-                    (attempts: {{ article.extraction_attempts }})
+                    <span class="mono">(content_type: {{ article.extracted_content_type }}, attempts: {{ article.extraction_attempts }} / {{ article.job_max_attempts }})</span>
                 </td>
             </tr>
             <tr>
@@ -111,6 +126,10 @@
                 <td class="mono">{{ last_attempt_display }}</td>
             </tr>
             <tr>
+                <th>Next Retry Scheduled</th>
+                <td class="mono">{{ next_retry_display }}</td>
+            </tr>
+            <tr>
                 <th>Content SHA-256 Hash</th>
                 <td class="mono">
                     {% match article.content_hash %}
@@ -120,6 +139,9 @@
             <tr>
                 <th>Discovered Across Feeds</th>
                 <td>
+                    {% if sources.is_empty() %}
+                    <span class="form-help">{{ article.feed_name }}</span>
+                    {% else %}
                     {% for src in sources %}
                     <div>
                         <a href="/feeds/{{ src.feed_id }}"><strong>{{ src.feed_name }}</strong></a>
@@ -130,6 +152,7 @@
                         {% endmatch %}
                     </div>
                     {% endfor %}
+                    {% endif %}
                 </td>
             </tr>
         </tbody>

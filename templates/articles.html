@@ -27,10 +27,10 @@
                 <label for="status">Extraction Status</label>
                 <select id="status" name="status">
                     <option value="">All Statuses</option>
-                    <option value="completed" {% if selected_status == "completed" %}selected{% endif %}>Completed (Full Text)</option>
-                    <option value="fallback" {% if selected_status == "fallback" %}selected{% endif %}>Fallback (Feed Summary)</option>
+                    <option value="completed" {% if selected_status == "completed" %}selected{% endif %}>Full text</option>
+                    <option value="fallback" {% if selected_status == "fallback" %}selected{% endif %}>Summary only</option>
                     <option value="pending" {% if selected_status == "pending" %}selected{% endif %}>Pending</option>
-                    <option value="processing" {% if selected_status == "processing" %}selected{% endif %}>Processing</option>
+                    <option value="processing" {% if selected_status == "processing" %}selected{% endif %}>Extracting</option>
                     <option value="failed" {% if selected_status == "failed" %}selected{% endif %}>Failed</option>
                 </select>
             </div>
@@ -69,7 +69,7 @@
                     <th>Author</th>
                     <th>Published</th>
                     <th>Discovered</th>
-                    <th>Extraction</th>
+                    <th>Content &amp; Extraction</th>
                     <th>Original</th>
                 </tr>
             </thead>
@@ -79,7 +79,14 @@
                     <td>
                         <a href="/articles/{{ item.row.id }}"><strong>{{ item.row.title }}</strong></a>
                     </td>
-                    <td><a href="/feeds/{{ item.row.feed_id }}">{{ item.row.feed_name }}</a></td>
+                    <td>
+                        {% match item.row.feed_id %}
+                        {% when Some with (fid) %}
+                        <a href="/feeds/{{ fid }}">{{ item.row.feed_name }}</a>
+                        {% when None %}
+                        <span class="form-help">{{ item.row.feed_name }}</span>
+                        {% endmatch %}
+                    </td>
                     <td>
                         {% match item.row.author %}
                         {% when Some with (author) %}
@@ -91,19 +98,14 @@
                     <td class="mono">{{ item.published_display }}</td>
                     <td class="mono">{{ item.discovered_display }}</td>
                     <td>
-                        {% if item.row.extraction_status == "completed" %}
-                        <span class="badge badge-enabled">completed</span>
-                        {% else if item.row.extraction_status == "fallback" %}
-                        <span class="badge badge-env">fallback</span>
-                        {% else if item.row.extraction_status == "failed" %}
-                        <span class="badge badge-danger">failed</span>
+                        {% if item.row.display_state == "Full text" || item.row.display_state == "Full text (refreshing)" %}
+                        <span class="badge badge-enabled">{{ item.row.display_state }}</span>
+                        {% else if item.row.display_state == "Summary only" || item.row.display_state == "Summary (full text pending)" %}
+                        <span class="badge badge-env">{{ item.row.display_state }}</span>
+                        {% else if item.row.display_state == "Failed" %}
+                        <span class="badge badge-danger">{{ item.row.display_state }}</span>
                         {% else %}
-                        <span class="badge badge-disabled">{{ item.row.extraction_status }}</span>
-                        {% endif %}
-                        {% if item.row.has_extracted_content %}
-                        <div class="form-help">Readable</div>
-                        {% else %}
-                        <div class="form-help">No body</div>
+                        <span class="badge badge-disabled">{{ item.row.display_state }}</span>
                         {% endif %}
                     </td>
                     <td>
