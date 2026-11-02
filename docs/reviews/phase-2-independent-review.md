@@ -503,3 +503,558 @@ After QUA-001 is fixed, with QUA-002 through QUA-004 corrected and covered by te
 - Portainer was not deployed.
 - No multi-arch (arm64) image was tested.
 - Behavior on slow storage (where the 50 ms stagger in scheduled ticks is least effective) was not measured.
+
+---
+
+# Appendices
+
+## Appendix A — Reproducing the Review
+
+### A.1 Environment used
+
+| Item | Value |
+|---|---|
+| Host | macOS 26.5.2, Apple M5 Pro (arm64) |
+| Toolchain | rustc 1.97.1 (2026-07-14), cargo 1.97.1 |
+| Docker Engine | 29.4.2 (Docker Desktop) |
+| SQLite (via `libsqlite3-sys` 0.30.1, bundled) | crate-bundled; host `sqlite3` CLI 3.51.0 used only to inspect databases |
+| Python | Homebrew `python3` (stdlib only), run with `-I` |
+| Not available | `cargo-audit`, `cargo-deny` |
+
+### A.2 Rerunning the reviewer tests
+
+```bash
+# 1. Disposable worktree; never run against your real data directory
+git worktree add --detach /tmp/quire-review HEAD
+cd /tmp/quire-review
+cp docs/reviews/phase-2-artifacts/review_tests.rs tests/
+mkdir -p examples && cp docs/reviews/phase-2-artifacts/crashprobe.rs examples/
+
+# 2. Gzip-bomb fixture used by r05 (200 MB of zeros, ~190 KB compressed).
+#    r05 reads $CARGO_MANIFEST_DIR/../bomb.gz, i.e. the worktree's parent directory.
+head -c 200000000 /dev/zero | gzip -9 > ../bomb.gz
+
+# 3. Run (each test asserts CORRECT behavior; failures document defects)
+cargo test --test review_tests -- --test-threads=4 --nocapture
+
+# 4. Measurement tests (long-running, print numbers rather than assert)
+cargo test --test review_tests r27 r28 r29 -- --nocapture
+
+# 5. Clean up
+cd - && git worktree remove --force /tmp/quire-review
+```
+
+Reviewer tests inject a `HostResolver` (`AnyHost`) that maps every hostname to the local fixture without IP checks. This simulates a public DNS answer and lets the real fetcher, redirect logic, and limits run against `127.0.0.1` without touching third-party hosts. Tests that probe the production resolver (r03) use `SystemDnsResolver` directly.
+
+### A.3 Rerunning the crash-recovery probe
+
+```bash
+# In the worktree from A.2 (crashprobe.rs already copied to examples/)
+cargo build --example crashprobe
+P=$PWD/target/debug/examples/crashprobe
+C=$(mktemp -d); mkdir -p $C/data; echo 30 > $C/delay; PORT=18931
+python3 -I docs/reviews/phase-2-artifacts/fixture.py $PORT $C/delay 20 &   # 20 articles, 30 s delay each
+$P $C/data $PORT &  PR=$!
+# wait until 4 jobs are 'processing'
+sqlite3 $C/data/q.db "select status,count(*) from article_extraction_jobs group by status"
+kill -9 $PR                                   # abrupt termination
+echo 0 > $C/delay                             # make articles fast
+$P $C/data $PORT &  PR=$!                     # restart; recovery runs at startup
+sqlite3 $C/data/q.db "select status,count(*) from article_extraction_jobs group by status"
+kill -INT $PR                                 # graceful path (see QUA-017)
+```
+
+### A.4 Rerunning the Docker checks
+
+```bash
+QUIRE_IMAGE=quire:review docker compose -p quirereview build
+bash docs/reviews/phase-2-artifacts/docker1.sh   # up, health, uid, CSRF, SSRF, settings, restart
+bash docs/reviews/phase-2-artifacts/docker2.sh   # stop, seed interrupted jobs, recreate, verify recovery
+docker compose -p quirereview -f compose.yaml -f docs/reviews/phase-2-artifacts/compose.review.yaml down -v
+docker rmi quire:review
+```
+
+The override renames the container to `quire-review`, publishes port 18080, and sets `QUIRE_FETCH_ENABLED=false` so the scheduler makes no outbound feed requests. Seeded article URLs use the reserved `.invalid` TLD (RFC 6761), which never resolves, so recovery and retry are exercised without contacting any real host. `docker2.sh` needs the host `sqlite3` CLI and BSD `tar` (for `--uid/--gid`).
+
+---
+
+## Appendix B — Methodology
+
+1. **Inventory:** `git log`, `git diff --stat/--name-status f0ec769..HEAD`, plus a full read of every changed Rust module, the migration, templates touched by Phase 2, Dockerfile, compose, workflows, `.env.example`, README, and docs.
+2. **Static analysis:** a line-by-line read of `src/feeds/{validation,fetcher,parser,scheduler,mod}.rs`, `src/articles/{mod,extractor,normalizer,sanitizer}.rs`, `src/db/mod.rs`, `src/main.rs`, and the security-relevant parts of `src/web/mod.rs` and `src/config.rs`.
+3. **Required validation commands:** run unmodified against `66980ec`.
+4. **Reviewer tests (r01–r29):** written to assert correct behavior, so a failing test is evidence of a defect. Every failure was re-read to confirm it failed for the intended reason, not a test bug. One reviewer test bug was found and corrected (the first r27 run used `https://` article links against a plain-HTTP fixture, so all extractions failed with TLS errors; the corrected run is reported).
+5. **Runtime experiments:** a SIGKILL/SIGINT crash probe running the real `IngestionCoordinator`; a Docker container with an isolated project, port, and volume; and load and contention measurements.
+6. **Confidence labels:**
+   - *Confirmed*: reproduced by a test or runtime experiment.
+   - *Code-supported*: established by source inspection, not reproduced.
+   - *Potential*: plausible, needs further verification.
+7. **Isolation:** no production source was modified, nothing was committed or pushed, and every container, volume, image, and worktree created for the review was removed. The only repository change is this `docs/reviews/` directory.
+
+---
+
+## Appendix C — Inventories
+
+### C.1 HTTP routes (`src/web/mod.rs:68-91`)
+
+| Method | Path | State change | CSRF verified | Verified at runtime |
+|---|---|---|---|---|
+| GET | `/` | no | n/a | yes |
+| GET | `/health` | no | n/a | yes (DB-only health) |
+| GET / POST | `/feeds` | POST creates feed | yes (`:346`) | 303 valid; 403 bad token; 403 no cookie; 422 missing field; 400 SSRF URL |
+| POST | `/feeds/fetch-all` | spawns fetches | yes (`:644`) | via r29 (function level) |
+| GET / POST | `/feeds/{id}` | POST updates feed | yes (`:560`) | — |
+| GET | `/feeds/{id}/edit` | no | n/a | — |
+| POST | `/feeds/{id}/fetch` | spawns fetch | yes (`:628`) | 404 for missing feed; GET → 405 |
+| POST | `/feeds/{id}/toggle` | toggles enabled | yes (`:655`) | — |
+| POST | `/feeds/{id}/delete` | deletes feed (requires `confirm=yes`) | yes (`:668`) | — |
+| GET | `/articles` | no | n/a | `page=0`, `page_size=100000`, `feed_id=abc`, `status=<script>` → 200, clamped/escaped |
+| GET | `/articles/{id}` | no | n/a | 404 for missing |
+| POST | `/articles/{id}/extract` | enqueues job | yes (`:886`) | — |
+| GET | `/editions` | no | n/a | — |
+| GET / POST | `/settings` | POST writes settings | yes (`:1008`) | env-locked refused; invalid → 400; valid → 303 |
+| GET | `/static/*` | no | n/a | — |
+
+CSRF design: a double-submit cookie `quire_csrf` (32 random bytes, hex; `HttpOnly; SameSite=Strict; Path=/`) compared to the `csrf_token` form field. The comparison is not constant-time; this is immaterial for a double-submit token and not reported as a finding.
+
+### C.2 `tokio::spawn` / task inventory
+
+| Location | Spawned work | Owner / handle | Failure observation | Shutdown behavior |
+|---|---|---|---|---|
+| `scheduler.rs:247` | Background scheduler loop | `JoinHandle` held by `main` | errors per tick logged (`warn!`); panic is unobserved until the handle is awaited | `main` awaits with a 10 s timeout, then abandons it |
+| `scheduler.rs:104` | Manual feed fetch (one per click / per feed in Fetch All) | **handle discarded** | none; an early `return` on config error leaves the feed claimed | not awaited; dropped at runtime shutdown |
+| `scheduler.rs:179` | Extraction job (`JoinSet`, batch of `extraction_concurrency`) | local `JoinSet` | `JoinError` counted as "not processed", not logged | runs until the batch completes; the drain loop keeps claiming |
+| `scheduler.rs:219` | Scheduled feed fetch (`JoinSet`, ≤ `fetch_concurrency`) | local `JoinSet` | same as above | same as above |
+
+### C.3 SQLite write-transaction inventory
+
+| Function | Location | Begin mode | First statement | Risk under concurrent writers |
+|---|---|---|---|---|
+| `persist_discovered_entries` | `articles/mod.rs:148` | deferred `BEGIN` | `SELECT` | **immediate `SQLITE_BUSY` (QUA-001)** |
+| `enqueue_manual_article_extraction` | `articles/mod.rs:461` | deferred | `SELECT` | same pattern (lower volume) |
+| `recover_interrupted_extractions` | `articles/mod.rs:477` | deferred | `UPDATE` | waits on busy_timeout (OK) |
+| `claim_next_extraction_job` | `articles/mod.rs:500-501` | raw `BEGIN IMMEDIATE` | `SELECT` | OK; raw SQL is not tracked by sqlx (QUA-019) |
+| `complete_extraction_job` | `articles/mod.rs:587-588` | raw `BEGIN IMMEDIATE` | `SELECT`/`UPDATE` | OK; QUA-019 |
+| `create_feed` / `update_feed` / `set_feed_enabled` | `feeds/mod.rs:223/273/325` | deferred | `INSERT`/`UPDATE` | waits (OK) |
+| `delete_feed` | `feeds/mod.rs:358` | deferred | `UPDATE` (with subquery reads) | waits (OK); QUA-006 constraint issue |
+| `try_claim_feed_fetch` | `feeds/mod.rs:415` | deferred | `UPDATE` | waits (OK) |
+| `complete_feed_fetch_run` | `feeds/mod.rs:503` | deferred (reads feed **before** the tx at `:480`) | `UPDATE` | waits (OK); read-modify-write race on `website_url`/`description` with a concurrent user edit (minor, not separately reported) |
+| `recover_interrupted_fetches` | `feeds/mod.rs:640` | deferred | `UPDATE` | waits (OK) |
+| `upsert_settings` | `db/mod.rs:228` | deferred | `DELETE`/`INSERT` | waits (OK) |
+
+Rule of thumb: a deferred transaction whose first statement is a write takes the write lock immediately and honors `busy_timeout`. One that reads first and later writes cannot wait safely in WAL mode, and SQLite fails it with `SQLITE_BUSY`.
+
+### C.4 Configuration matrix
+
+| Env var | Default | Accepted range | DB-overridable | Invalid env value | Notes |
+|---|---|---|---|---|---|
+| `QUIRE_FETCH_ENABLED` | `true` | bool | yes | startup error | Docker: locked when set; UI override refused |
+| `QUIRE_FETCH_INTERVAL_MINUTES` | 60 | min_interval..=10080 | yes | startup error | UI: −5, `abc`, 10²⁰ → 400 |
+| `QUIRE_FETCH_MIN_INTERVAL_MINUTES` | 5 | 1..=10080 | no | startup error | values 1–4 not honored (QUA-021) |
+| `QUIRE_FETCH_CONCURRENCY` | 4 | 1..=32 | yes | startup error | not applied to manual fetches (QUA-003) |
+| `QUIRE_EXTRACTION_CONCURRENCY` | 4 | 1..=32 | yes | startup error | UI: 0 → 400 "must be between 1 and 32" |
+| `QUIRE_FEED_REQUEST_TIMEOUT_SECONDS` | 30 | 5..=300 | yes | startup error | — |
+| `QUIRE_ARTICLE_REQUEST_TIMEOUT_SECONDS` | 45 | 5..=300 | yes | startup error | — |
+| `QUIRE_MAX_FEED_RESPONSE_BYTES` | 10 MiB | 64 KiB..=100 MiB | yes | startup error | enforced on decompressed bytes (r05) |
+| `QUIRE_MAX_ARTICLE_RESPONSE_BYTES` | 15 MiB | 64 KiB..=100 MiB | yes | startup error | — |
+| `QUIRE_MAX_FEED_ENTRIES` | 200 | 1..=5000 | yes | startup error | keeps first N, not newest (QUA-015) |
+| `QUIRE_FETCH_MAX_ATTEMPTS` | 3 | 1..=10 | yes | startup error | also used as job `max_attempts` |
+| `QUIRE_FETCH_RETRY_INITIAL_SECONDS` | 2 | 1..=120 | no | startup error | — |
+| `QUIRE_FETCH_RETRY_MAX_SECONDS` | 30 | 1..=600, ≥ initial | no | startup error | caps `Retry-After` |
+
+Not configurable: connect timeout 10 s, max redirects 5, fetch-history retention 100 per feed, scheduler poll 30 s, pool size 8, busy_timeout 10 s.
+
+### C.5 Dependencies added in Phase 2
+
+| Crate | Locked version | Purpose | Assessment |
+|---|---|---|---|
+| `ammonia` | 4.2.4 | HTML sanitization | appropriate, widely used allow-list sanitizer |
+| `dom_query` | 0.29 | DOM preprocessing / text extraction | also a `dom_smoothie` dependency; justified |
+| `encoding_rs` | 0.8 | charset decoding | appropriate |
+| `futures-util` | 0.3 | `StreamExt` for body streaming | appropriate |
+| `reqwest` features `gzip`, `deflate`, `brotli`, `stream` | 0.13 | compression + streaming | limit applies to decompressed size (verified) |
+
+Pre-existing (Phase 1), still unused in `src/`: `epub-builder` (Phase 5 scope). `cargo tree -d` shows duplicate major versions only in transitive crates (`base64` 0.22/0.23, `hashbrown` 0.15/0.17, `getrandom` 0.3/0.4, `phf` 0.12/0.14, `foldhash` 0.1/0.2); not a defect. No `unsafe` in `src/`. Advisory status is **unverified** (no `cargo audit`).
+
+### C.6 CI / supply chain (`.github/workflows/`)
+
+| Item | Observation |
+|---|---|
+| Permissions | `ci.yml`: `contents: read`; `publish-container.yml`: `contents: read`, `packages: write`. Least privilege, OK |
+| Action pinning | tags only (`actions/checkout@v4`, `docker/*@v3/v5/v6`, `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`), no SHA pins. Recommended: pin to commit SHAs |
+| Reproducibility | `cargo test --locked`, `cargo build --release --locked`; Dockerfile `--locked`; base image `rust:1.97-slim-bookworm` is tag-pinned, not digest-pinned |
+| Secrets | only `GITHUB_TOKEN` |
+| Publishing | `linux/amd64,linux/arm64` via QEMU; tags `sha-<long>`, `<short-sha>`, branch, semver, `latest` on default branch |
+| Gaps | no `cargo audit`/`cargo deny` step; no SBOM or provenance attestation; publish runs on every push to `main` independently of CI success |
+
+---
+
+## Appendix D — Evidence for Each Defect
+
+### D.1 QUA-001: deferred transaction that reads before writing
+
+```rust
+// src/articles/mod.rs:148 — deferred transaction
+let mut tx = pool.begin().await?;
+for entry in entries {
+    let outcome = upsert_single_entry(&mut tx, feed_id, entry, i64::from(max_attempts)).await?;
+    ...
+}
+tx.commit().await?;
+
+// src/articles/mod.rs:185-201 — first statement inside the tx is a read
+let existing = sqlx::query_as::<_, ExistingArticleRow>(
+    "SELECT id, feed_id, external_guid, ... FROM articles WHERE canonical_url = ?",
+)
+```
+
+```rust
+// src/feeds/scheduler.rs:220-223 — the only thing separating concurrent scheduled persists
+if idx > 0 {
+    tokio::time::sleep(Duration::from_millis((idx as u64) * 50)).await;
+}
+```
+
+Test output (unedited):
+
+```
+r17: persist batches failed: 17/18; completed jobs during run: 4;
+     first: Some("Database(Database(SqliteError { code: 5, message: \"database is locked\" }))")
+r24: first error: Database(Database(SqliteError { code: 5, message: "database is locked" }))
+     4-way concurrent persists: 30/40 batches failed
+r25: runs=8 failed=6 articles=80 sample=Some(("failed", Some("database"),
+     Some("Database error while persisting discovered articles.")))
+r29 (3 consecutive runs):
+     CONTENTION tick/100-entry feeds: [("success:", 12)]
+     CONTENTION tick/200-entry feeds: [("success:", 12)]
+     CONTENTION fetch-all/30-entry feeds: [("failed:database", 8), ("success:", 4)]
+     CONTENTION fetch-all/30-entry feeds: [("failed:database", 9), ("success:", 3)]
+     CONTENTION fetch-all/30-entry feeds: [("failed:database", 9), ("success:", 3)]
+```
+
+The r24 test creates 4 feeds and runs `persist_discovered_entries` concurrently for 30 entries each, 10 rounds, with no other writers. This models four scheduled feeds completing together under default `QUIRE_FETCH_CONCURRENCY=4`, minus the 50 ms stagger.
+
+What happens to the data: the run row is completed as `failed` / `error_category = 'database'`; `etag`/`last_modified` are not advanced; `consecutive_failures` increments, so the next poll is delayed by interval × 2ⁿ (up to 16×). No partial batch is written; everything rolls back.
+
+### D.2 QUA-002: fallback on retryable fetch errors
+
+```rust
+// src/articles/extractor.rs:136-152
+Err(fetch_err) => {
+    if let Some(summary) = fallback_summary
+        && let Some(fallback_html) = sanitize_summary_fallback(summary, base_url.as_ref())
+    {
+        ...
+        ExtractionResult::Fallback { sanitized_html: fallback_html, content_hash,
+                                     reason: fetch_err.message }   // retryable flag discarded
+    } else {
+        ExtractionResult::Failed { error_message: fetch_err.message,
+                                   retryable: fetch_err.retryable }
+    }
+}
+```
+
+```
+r13: Fallback { sanitized_html: "<p>Feed summary text</p>", ..., reason: "Upstream server returned HTTP 503." }
+r14: job=completed attempts=1 article=skipped retry_at=None
+r28: FAILLOAD elapsed=40.769436041s articles=[("skipped/summary_fallback", 100)] jobs=[("completed", 100)]
+Docker (seeded job WITH summary, unresolvable host):
+  article_extraction_completed article_id=1 ... status="fallback" reason=Validation error: DNS resolution failed ...
+Docker (seeded job WITHOUT summary):
+  02:11:49 article_extraction_failed article_id=2 attempt=2
+  02:12:49 article_extraction_started article_id=2 attempt=3      (+60 s backoff = 15·2²)
+  02:12:56 article_extraction_failed ...  → final state badge "failed"
+```
+
+The retry machinery works (as the summary-less job shows); it is bypassed whenever a summary exists.
+
+Retry schedule as implemented, for reference:
+- HTTP-level retries inside one job attempt: `fetch_max_attempts` (default 3), backoff `2s·2^(n−1)` with 0–25 % jitter, capped at 30 s; `Retry-After` honored up to the cap. Retryable: timeout, connect, 429, 5xx, DNS. Non-retryable: 4xx, TLS, SSRF, too large, redirect errors.
+- Job-level retries: re-queue after `15·2^attempts` seconds (30 s, 60 s, …, capped at 1800 s) while `attempts < max_attempts`.
+- Worst case for one unreachable article with default settings: 3 job attempts × 3 HTTP attempts × 45 s timeout, plus backoffs, ≈ 7 minutes of worker time.
+
+### D.3 QUA-003: manual fetch bypasses the concurrency limit
+
+```rust
+// src/feeds/scheduler.rs:122-136 — one detached task per enabled feed, no semaphore
+for feed in all_feeds.into_iter().filter(|f| f.enabled && !f.fetch_in_progress) {
+    if let Ok(ManualTriggerOutcome::Started { .. }) = self.trigger_manual_feed_fetch(feed.id).await {
+        started += 1;
+    }
+}
+// src/feeds/scheduler.rs:104 — handle discarded
+tokio::spawn(async move { ... coordinator.execute_claimed_feed_fetch(feed, run_id, &rt_cfg).await; ... });
+```
+
+```
+r23: started=10 max concurrent feed requests=10 (limit 2) inflight_now=0
+```
+
+The fixture endpoint `/slowfeed` increments an in-flight counter, sleeps 800 ms, and records the maximum observed concurrency.
+
+### D.4 QUA-004: no in-process recovery
+
+```rust
+// src/articles/mod.rs:390-393 — manual retry is refused while 'processing'
+if status == "processing" || (status == "queued" && !force_reset) {
+    return Ok(false);
+}
+// src/feeds/scheduler.rs:105-111 — feed already claimed (fetch_in_progress = 1); early return never completes the run
+Err(e) => { error!(...); return; }
+// src/feeds/scheduler.rs:318 etc. — completion errors discarded
+let _ = complete_feed_fetch_run(&self.pool, CompleteFeedRunUpdate { ... }).await;
+```
+
+```
+r18: manual requeue accepted=false drained=0
+```
+
+The UI then shows "Article extraction is already in progress." until the container restarts.
+
+### D.5 QUA-005: XML text filter
+
+```rust
+// src/feeds/parser.rs:43-52
+let head = String::from_utf8_lossy(&bytes[..prefix_len]).to_ascii_uppercase();
+if head.contains("<!ENTITY") || head.contains("SYSTEM \"FILE:") || head.contains("PUBLIC \"") {
+    return Err(AppError::Validation("Feed XML rejected: external entity or DTD declarations are not permitted.".to_string()));
+}
+```
+
+```
+r07 input:  <description>The company went PUBLIC "today" after years of delay.</description>
+    result: legit feed rejected: Some(Validation("Feed XML rejected: external entity or DTD declarations are not permitted."))
+r08 input:  <!DOCTYPE rss PUBLIC "-//Netscape Communications//DTD RSS 0.91//EN" "http://my.netscape.com/publish/formats/rss-0.91.dtd">
+    result: RSS 0.91 feed rejected: (same error)
+r09 input:  70 KB comment padding, then <!DOCTYPE rss [ billion-laughs entities a..d + <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+    result: entity parse elapsed 1.718375ms -> Ok((Some("&d;"), Some("&xxe;")))   ← no expansion, no file read
+```
+
+Because the comparison is case-insensitive, any occurrence of `public "` in the first 64 KB triggers the rejection, including article text, titles, and descriptions.
+
+### D.6 QUA-006: GUID collision on reassignment
+
+Sequence used by r22:
+
+| Step | Action | Resulting rows |
+|---|---|---|
+| 1 | Feed B persists `/x` with GUID `g` | `articles(X, feed=B, guid=g)`, `afs(X,B,g)` |
+| 2 | Feed A persists `/y` with GUID `h` | `articles(Y, feed=A, guid=h)`, `afs(Y,A,h)` |
+| 3 | Feed B persists `/y` with GUID `g` (publisher moved GUID `g` to a new URL) | `afs(X,B,NULL)`, `afs(Y,B,g)`; `articles(X).guid` **stays `g`** because X's owner (B) ≠ Y's owner (A) at `articles/mod.rs:216` |
+| 4 | Delete feed A | reassignment sets `articles(Y).feed=B, guid=g` → collides with X |
+
+```
+r22: delete feed A -> Err(Database(Database(SqliteError { code: 2067,
+     message: "UNIQUE constraint failed: articles.feed_id, articles.external_guid" })))
+```
+
+### D.7 QUA-007: edition cascade
+
+```sql
+-- migrations/0001_initial_schema.sql
+FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE          -- articles
+FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE    -- edition_articles
+```
+
+```
+r21: edition_articles after feed delete: 0      (was 1)
+```
+
+### D.8 QUA-010 / QUA-011: queue ownership
+
+```rust
+// src/articles/mod.rs:645-657 (and the other completion branches) — no ownership predicate
+"UPDATE article_extraction_jobs SET status = 'completed', ... WHERE id = ?"
+// src/articles/mod.rs:504-510 — claim ignores attempts vs max_attempts
+"SELECT id, article_id FROM article_extraction_jobs
+ WHERE status = 'queued' AND next_eligible_at <= ... ORDER BY next_eligible_at ASC, id ASC LIMIT 1"
+```
+
+```
+r19: job=failed article=failed            (newer 'completed' result overwritten by stale worker)
+r20: claims across 10 crash/restart cycles: 10 (max_attempts=3)
+```
+
+### D.9 QUA-012 / QUA-013: SSRF edges
+
+```
+r02: not blocked: ["64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "2002:c0a8:101::", "fec0::1"]
+r03: Err(Validation("DNS resolution failed for host '[2606:4700:4700::1111]': failed to lookup address
+     information: nodename nor servname provided, or not known"))
+r04: fetcher connected to 127.0.0.1 because the injected resolver did not filter
+```
+
+```rust
+// src/feeds/fetcher.rs:245-249 — no .no_proxy(); env proxies (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) apply
+let mut client_builder = reqwest::Client::builder()
+    .user_agent(USER_AGENT)
+    .redirect(Policy::none())
+    .connect_timeout(options.connect_timeout.min(remaining_timeout))
+    .timeout(remaining_timeout);
+```
+
+r04 also serves as positive evidence that DNS pinning works. The hostname `rebind.example.com` was connected to the address returned by the resolver, not one obtained from real DNS.
+
+### D.10 QUA-014 / QUA-015 / QUA-016
+
+```
+r15: Completed { sanitized_html: "<div>%PDF-1.4\n1 0 obj &lt;&lt; /Type /Catalog &gt;&gt; endobj\nstream\nBT /F1 12 Tf (Hello binary ...", ... }
+r10: kept ["old1", "old2"]       (feed order old1, old2, new3, new4; limit 2)
+r11: bare-key query -> https://e.example.com/p?123=
+     (passes: ?id=123 ≠ ?id=456; "?utm_source=x&id=1#frag" → "?id=1")
+```
+
+### D.11 QUA-017: shutdown
+
+```
+pre-SIGINT processing=4
+graceful shutdown took 10s
+probe exited cleanly                 ← printed although the scheduler task was abandoned at the timeout
+after SIGINT: jobs=processing:4 queued:16      (recovered correctly on the next start)
+```
+
+---
+
+## Appendix E — Crash-Recovery Transcript (SIGKILL)
+
+Setup: fixture serving 20 articles, each delayed 30 s; probe with `QUIRE_EXTRACTION_CONCURRENCY=4`, a fresh database, and one feed.
+
+```
+before kill: articles=20 jobs=processing:4
+                              queued:16
+SIGKILLed probe
+after kill:  jobs=processing:4 attempts=4
+                  queued:16 attempts=0
+             feed_in_progress=0 runs=success
+(article delay set to 0, probe restarted)
+INFO quire::feeds::scheduler: Recovered interrupted ingestion state on startup recovered_fetches=0 recovered_extractions=4
+after restart: jobs=completed:20 articles=extracted:20 attempts=2,1
+```
+
+Interpretation:
+- Discovery and job creation were committed atomically before the kill (20 articles, 20 jobs).
+- The 4 in-flight jobs were reset to `queued` at startup and completed, with their interrupted attempt counted (`attempts=2`).
+- No article was lost or duplicated.
+
+## Appendix F — Docker Transcript
+
+```
+Container quire-review Started
+health=healthy after ~9s
+uid=10001(quire) gid=10001(quire) groups=10001(quire)
+/data: quire.db, quire.db-shm, quire.db-wal (owner quire:quire)
+{"status":"ok","application":"quire","version":"0.2.0","database":{"connected":true,"journal_mode":"wal","foreign_keys_enabled":true}}
+create feed: 303 -> /feeds?msg=created
+create feed (bad csrf): 403
+create feed (no csrf cookie): 403
+create feed (missing token field): 422
+ssrf feed 169.254: 400
+settings fetch_enabled=true (env-locked): "locked by an environment variable and cannot be modified."
+settings extraction_concurrency=0: 400 "Max Concurrent Extractions must be between 1 and 32."
+settings fetch_interval_minutes = -5 / abc / 99999999999999999999: 400 / 400 / 400
+settings save valid (fetch_interval_minutes=120): 303 -> /settings?msg=settings_saved
+GET /articles/999999: 404
+GET /articles?page=0&page_size=100000: 200
+GET /articles?feed_id=abc&status=<script>: 200
+POST fetch nonexistent feed: 404
+GET /feeds/1/fetch: 405
+--- docker compose restart
+Review Feed                                   (feed persisted)
+name="fetch_interval_minutes" ... value="120" (setting persisted)
+--- stop; copy DB out; seed 2 articles + 2 'processing' jobs + 1 'running' fetch; copy back as uid 10001
+--- docker compose up -d --force-recreate   (same volume)
+INFO Recovered interrupted ingestion state on startup recovered_fetches=1 recovered_extractions=2
+INFO article_extraction_started article_id=1 job_id=1 attempt=2
+INFO article_extraction_started article_id=2 job_id=2 attempt=2
+INFO article_extraction_completed article_id=1 ... status="fallback" reason=... DNS resolution failed for host 'quire-review.invalid'
+WARN article_extraction_failed article_id=2 ... DNS resolution failed ...
+feed detail: run status "cancelled", "Interrupted by application restart or shutdown."
+WARN/INFO (60 s later) article_id=2 attempt=3 → failed  (final)
+--- down -v; image removed
+```
+
+The healthcheck stayed `healthy` throughout, while every outbound fetch and extraction failed, which confirms that application health is separate from feed health.
+
+## Appendix G — Load-Test Output
+
+```
+r27 (debug build, AnyHost fixture, defaults: fetch 4, extraction 4)
+LOAD first pass: ticks=25 elapsed=5.260718833s runs=[("success", 100)] articles=1000 dup_urls=0
+                 article_status=[("extracted", 1000)] jobs=[("completed", 1000)] db+wal_bytes=6009032
+LOAD repeat pass: elapsed=4.021803834s runs=[("success", 200)] articles=1000 re-extracted=0
+maximum resident set size: 25,985,024 bytes
+
+r28 (100 articles returning HTTP 500; fetch 1, extraction 8; retry backoff 1 s)
+FAILLOAD elapsed=40.769436041s articles=[("skipped/summary_fallback", 100)] jobs=[("completed", 100)]
+maximum resident set size: 25,591,808 bytes
+```
+
+Notes:
+- 100 feeds needed 25 ticks because each tick claims at most `fetch_concurrency` feeds. With the 30 s production poll interval, polling 100 overdue feeds takes ≥ 12.5 minutes even with an empty extraction queue (see QUA-008).
+- The repeat pass hit no `304`s because the fixture sends an `ETag` but ignores `If-None-Match`; all 1,000 entries were re-parsed and correctly classified as unchanged.
+
+## Appendix H — Evidence for Controls That Passed
+
+```
+r01 (redirect targets, each via 302 from a "public" host):
+/r-loop      http://127.0.0.1:PORT/secret        SsrfBlocked  "Redirect URL cannot target private, loopback, or link-local IP addresses."
+/r-loop6     http://[::1]:PORT/secret            SsrfBlocked
+/r-mapped    http://[::ffff:7f00:1]:PORT/secret  SsrfBlocked
+/r-hex       http://0x7f000001:PORT/secret       SsrfBlocked
+/r-int       http://2130706433:PORT/secret       SsrfBlocked
+/r-short     http://127.1:PORT/secret            SsrfBlocked
+/r-localhost http://localhost:PORT/secret        SsrfBlocked  "Redirect URL cannot target localhost or internal hostnames."
+/r-lan       http://192.168.1.1/                 SsrfBlocked
+/r-meta      http://169.254.169.254/latest/...   SsrfBlocked
+internal /secret endpoint hits: 0
+
+r05: 200 MB gzip bomb, limit 1 MiB → ResponseTooLarge in 6.7 ms
+r06: 1 byte / 200 ms body, request_timeout 2 s → Timeout after 2.0016 s ("Response streaming timed out after 2s.")
+
+r12 sanitizer output for 20 vectors (complete output):
+<p>ok</p>
+<a rel="noopener noreferrer">j</a><a rel="noopener noreferrer">j2</a>
+<a rel="noopener noreferrer">d</a>
+<div>s</div>
+<a href="https://ok.example.com" rel="noopener noreferrer">fine</a>
+
+r16: claimed=300 unique=300 errors=0 (16 concurrent claimers, multi-thread runtime)
+
+r26 (real sqlx-migrated Phase 1 DB → Phase 2, then restart):
+counts=(2, 4, 1, 1, 2, 4) migrations=[(1, true), (2, true)] fk_violations=0
+feed1=("2025-01-01T00:00:00Z", Some("old err")) jobs_for_legacy_pending=0   ← QUA-022
+(identical on the second start: no re-application)
+```
+
+## Appendix I — Rules Removed from `AGENTS.md` by `66980ec`
+
+| Removed rule (pre-Phase-2 wording, abridged) | Still relied on by current code? |
+|---|---|
+| §6 Docker: multi-stage build, Debian slim, nonroot `quire` UID 10001, port 8080, state under `/data`, working `HEALTHCHECK` | yes (Dockerfile satisfies it today; the rule protects it) |
+| §6 Compose must work locally and as a Portainer Stack from `ghcr.io/spencerthayer/quire` | yes |
+| §6 Never require privileged containers, Docker socket, or host networking | yes |
+| §9 Implement only the current phase; no stubbed or fake features; document unimplemented features honestly | yes |
+| §3 Minimal Dependencies | yes |
+| §5 Appropriate Indexes | yes |
+| §5 Non-Blocking Operations (never block the Tokio runtime) | relevant to QUA-018 |
+| §7 Secret Protection (`QUIRE_AI_API_KEY`, `QUIRE_ELEVENREADER_REFRESH_TOKEN` never in DB, logs, HTML, JSON) | yes (`db/mod.rs:210` allow-list) |
+| §7 Parameterized Queries | yes |
+| §7 Safe Error Responses (log internally, generic to clients) | yes |
+| §7 Do not trust `X-Forwarded-*` unless a trusted proxy is configured | yes |
+| §7 SSRF explicit list (`localhost`, `.local`, `.internal`, loopback, link-local, RFC1918) and HTTP timeouts on all outbound requests | partially replaced by a more general rule |
+| §8 Inspect `./repos/` and `docs/references.md` before new subsystems; adapt only MIT code with attribution | yes |
+
+## Appendix J — Status Model Reference
+
+Phase 2 keeps Phase 1's `CHECK (extraction_status IN ('pending','extracted','failed','skipped'))` and derives a logical status (`articles/mod.rs:16-29`):
+
+| `articles.extraction_status` | `extracted_content_type` | Job status | Logical status shown in UI |
+|---|---|---|---|
+| any | any | `processing` | `processing` |
+| `pending` | — | `queued` | `pending` |
+| `extracted` | `html` | `completed` | `completed` |
+| `extracted` | `summary_fallback` | — | `fallback` |
+| `skipped` | `summary_fallback` | `completed` | `fallback` |
+| `failed` | — | `failed` | `failed` |
+
+The dashboard counters (`db/mod.rs:116-174`) use the raw columns, not the logical status. They agree with the table above except that a `processing` article is counted under `pending` on the dashboard and shown as `processing` in the article list. This is cosmetic and not reported as a finding.
