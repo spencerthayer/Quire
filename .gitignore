@@ -52,6 +52,7 @@ dist/
 build/
 .cache/
 *.log
+/_logs/
 
 # Editors / tools
 .vscode/

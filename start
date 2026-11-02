@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Build and start the local Quire container, then follow its logs.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$root"
+
+env_file="${root}/.env"
+log_dir="${root}/_logs"
+pid_file="${log_dir}/log-follow.pid"
+
+if [[ ! -f "$env_file" ]]; then
+  echo "Missing .env. Copy .env.example to .env, then run ./start again." >&2
+  exit 1
+fi
+
+load_env() {
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ ! "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      echo "Ignoring unreadable .env line: ${line%%=*}" >&2
+      continue
+    fi
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+      value="${BASH_REMATCH[1]}"
+    elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
+      value="${BASH_REMATCH[1]}"
+    fi
+    export "${key}=${value}"
+  done < "$env_file"
+}
+
+stop_log_follow() {
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+  local pid
+  pid="$(cat "$pid_file")"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$pid_file"
+}
+
+load_env
+mkdir -p "$log_dir"
+stop_log_follow
+
+override="$(mktemp)"
+cleanup() {
+  rm -f "$override"
+}
+trap cleanup EXIT
+
+cat > "$override" <<EOF
+services:
+  quire:
+    env_file:
+      - "${env_file}"
+EOF
+
+docker compose \
+  --env-file "$env_file" \
+  --project-directory "$root" \
+  -f "${root}/compose.yaml" \
+  -f "$override" \
+  up -d --build
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+logfile="${log_dir}/quire-${stamp}.log"
+
+{
+  echo "# quire container logs"
+  echo "# started_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "# container: quire"
+  echo
+} > "$logfile"
+
+nohup docker logs -f --timestamps quire >> "$logfile" 2>&1 &
+echo $! > "$pid_file"
+disown || true
+
+ln -sfn "$(basename "$logfile")" "${log_dir}/latest.log"
+
+port="${QUIRE_PORT:-8080}"
+echo "Container quire is up."
+echo "UI: http://localhost:${port}"
+echo "Logs: ${logfile}"
+echo "Latest: ${log_dir}/latest.log"
