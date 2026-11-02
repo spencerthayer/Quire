@@ -4,20 +4,27 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Dashboard</h1>
-    <p>System overview for Quire v{{ app_version }}.</p>
+    <div>
+        <h1>Dashboard</h1>
+        <p>System overview and ingestion telemetry for Quire v{{ app_version }}.</p>
+    </div>
 </div>
 
 <div class="stats-grid">
     <div class="stat-card">
         <div class="stat-label">Configured Feeds</div>
         <div class="stat-value">{{ counts.total_feeds }}</div>
-        <div class="stat-meta">{{ counts.enabled_feeds }} enabled</div>
+        <div class="stat-meta">{{ counts.enabled_feeds }} enabled &middot; {{ counts.running_fetches }} running</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Collected Articles</div>
+        <div class="stat-label">Stored Articles</div>
         <div class="stat-value">{{ counts.total_articles }}</div>
-        <div class="stat-meta">Stored in SQLite</div>
+        <div class="stat-meta">{{ counts.extracted_articles }} extracted &middot; {{ counts.fallback_articles }} fallback</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Extraction Queue</div>
+        <div class="stat-value">{{ counts.pending_extractions }}</div>
+        <div class="stat-meta">Pending / processing &middot; {{ counts.failed_extractions }} failed</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Generated Editions</div>
@@ -32,16 +39,30 @@
 </div>
 
 <div class="card">
-    <h2>Application Status</h2>
+    <h2>Application &amp; Scheduler Status</h2>
     <table>
         <tbody>
             <tr>
                 <th>Application</th>
-                <td>Quire v{{ app_version }} (Phase 1 Foundation)</td>
+                <td>Quire v{{ app_version }} (Phase 2 RSS/Atom Ingestion &amp; Article Extraction)</td>
             </tr>
             <tr>
                 <th>HTTP Status</th>
                 <td><span class="badge badge-enabled">Online</span></td>
+            </tr>
+            <tr>
+                <th>Automatic Feed Polling</th>
+                <td>
+                    {% if fetch_enabled %}
+                    <span class="badge badge-enabled">Enabled</span> (default every {{ fetch_interval_minutes }} min)
+                    {% else %}
+                    <span class="badge badge-disabled">Paused</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Last Ingestion Activity</th>
+                <td class="mono">{{ last_ingestion_display }}</td>
             </tr>
             <tr>
                 <th>Database Engine</th>
@@ -59,14 +80,49 @@
     </table>
 </div>
 
+{% if !recent_failures.is_empty() %}
+<div class="card">
+    <h2>Recent Ingestion Failures</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Feed</th>
+                    <th>Timestamp</th>
+                    <th>Category</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for fail in recent_failures %}
+                <tr>
+                    <td><a href="/feeds/{{ fail.feed_id }}"><strong>{{ fail.feed_name }}</strong></a></td>
+                    <td class="mono">{{ fail.started_at_display }}</td>
+                    <td>
+                        {% match fail.error_category %}
+                        {% when Some with (cat) %}
+                        <span class="badge badge-danger">{{ cat }}</span>
+                        {% when None %}
+                        <span class="badge badge-danger">error</span>
+                        {% endmatch %}
+                    </td>
+                    <td class="mono">{{ fail.error_message }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
 <div class="card">
     <h2>Quick Actions</h2>
-    <p>Manage RSS and Atom feed subscriptions or inspect runtime settings.</p>
+    <p>Manage RSS and Atom feed subscriptions, inspect extracted articles, or adjust ingestion settings.</p>
     <div class="actions-cell">
         <a class="btn btn-primary" href="/feeds">Manage Feeds</a>
-        <a class="btn btn-secondary" href="/articles">View Articles</a>
+        <a class="btn btn-secondary" href="/articles">Browse Articles</a>
         <a class="btn btn-secondary" href="/editions">View Editions</a>
-        <a class="btn btn-secondary" href="/settings">View Settings</a>
+        <a class="btn btn-secondary" href="/settings">Ingestion Settings</a>
     </div>
 </div>
 {% endblock %}

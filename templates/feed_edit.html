@@ -4,8 +4,11 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Edit Feed</h1>
-    <p>Update configuration for <strong>{{ feed.name }}</strong>.</p>
+    <div>
+        <h1>Edit Feed</h1>
+        <p>Update configuration and scheduling overrides for <strong>{{ feed.name }}</strong>.</p>
+    </div>
+    <a class="btn btn-secondary" href="/feeds/{{ feed.id }}">View Feed Details</a>
 </div>
 
 {% match error_message %}
@@ -34,10 +37,20 @@
                 <label for="description">Description (optional)</label>
                 <input id="description" name="description" type="text" maxlength="1000" value="{{ form_description }}">
             </div>
+            <div class="form-group">
+                <label for="fetch_interval_minutes">Fetch Interval Override (minutes, optional)</label>
+                <input id="fetch_interval_minutes" name="fetch_interval_minutes" type="number" min="5" max="10080" placeholder="Leave blank for default ({{ default_interval_minutes }} min)" value="{{ form_fetch_interval }}">
+                <div class="form-help">Between 5 and 10080 minutes (7 days). Leave empty to use global default.</div>
+            </div>
+            <div class="form-group">
+                <label for="max_entries_override">Max Entries Per Fetch Override (optional)</label>
+                <input id="max_entries_override" name="max_entries_override" type="number" min="1" max="5000" placeholder="Leave blank for default ({{ default_max_entries }})" value="{{ form_max_entries }}">
+                <div class="form-help">Maximum feed entries processed per fetch (1..=5000).</div>
+            </div>
         </div>
         <div class="checkbox-row">
             <input id="enabled" name="enabled" type="checkbox" value="true" {% if form_enabled %}checked{% endif %}>
-            <label for="enabled">Feed enabled</label>
+            <label for="enabled">Enable automatic fetching for this feed</label>
         </div>
         <div class="actions-cell">
             <button class="btn btn-primary" type="submit">Save Changes</button>

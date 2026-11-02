@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+
+{% block title %}{{ feed.name }} | Feed Details | Quire{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>{{ feed.name }}</h1>
+        <p class="mono">{{ feed.feed_url }}</p>
+    </div>
+    <div class="actions-cell">
+        <form class="inline-form" method="post" action="/feeds/{{ feed.id }}/fetch">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-primary" type="submit" {% if feed.fetch_in_progress %}disabled{% endif %}>
+                {% if feed.fetch_in_progress %}Fetch Running...{% else %}Fetch Now{% endif %}
+            </button>
+        </form>
+        <a class="btn btn-secondary" href="/feeds/{{ feed.id }}/edit">Edit Feed</a>
+        <a class="btn btn-secondary" href="/feeds">Back to Feeds</a>
+    </div>
+</div>
+
+{% if feed.fetch_in_progress %}
+<div class="alert alert-warning" role="status">
+    This feed is currently being fetched in the background. <a href="/feeds/{{ feed.id }}">Refresh this page</a> to inspect the completed execution result.
+</div>
+{% endif %}
+
+{% match flash_message %}
+{% when Some with (msg) %}
+<div class="alert alert-success" role="status">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+<div class="card">
+    <h2>Feed Metadata &amp; Schedule</h2>
+    <table>
+        <tbody>
+            <tr>
+                <th>Status</th>
+                <td>
+                    {% if feed.enabled %}
+                    <span class="badge badge-enabled">Enabled</span>
+                    {% else %}
+                    <span class="badge badge-disabled">Disabled</span>
+                    {% endif %}
+                    {% if feed.fetch_in_progress %}
+                    <span class="badge badge-env">Fetching</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Website URL</th>
+                <td>
+                    {% match feed.website_url %}
+                    {% when Some with (site) %}
+                    <a class="mono" href="{{ site }}" target="_blank" rel="noopener noreferrer">{{ site }}</a>
+                    {% when None %}
+                    <span class="form-help">&mdash;</span>
+                    {% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Description</th>
+                <td>
+                    {% match feed.description %}
+                    {% when Some with (desc) %}
+                    {{ desc }}
+                    {% when None %}
+                    <span class="form-help">&mdash;</span>
+                    {% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Polling Interval</th>
+                <td>
+                    {% match feed.fetch_interval_minutes %}
+                    {% when Some with (mins) %}
+                    {{ mins }} minutes (per-feed override)
+                    {% when None %}
+                    {{ default_interval_minutes }} minutes (global default)
+                    {% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Max Entries Per Fetch</th>
+                <td>
+                    {% match feed.max_entries_override %}
+                    {% when Some with (max) %}
+                    {{ max }} entries (per-feed override)
+                    {% when None %}
+                    {{ default_max_entries }} entries (global default)
+                    {% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Next Scheduled Fetch</th>
+                <td class="mono">{{ next_scheduled_display }}</td>
+            </tr>
+            <tr>
+                <th>Last Attempted Fetch</th>
+                <td class="mono">{{ last_attempted_display }}</td>
+            </tr>
+            <tr>
+                <th>Last Successful Fetch</th>
+                <td class="mono">{{ last_successful_display }}</td>
+            </tr>
+            <tr>
+                <th>Last Fetch Result</th>
+                <td>
+                    <span class="badge badge-db">{{ feed.last_fetch_status }}</span>
+                    {% match feed.last_http_status %}
+                    {% when Some with (code) %}
+                    <span class="mono">HTTP {{ code }}</span>
+                    {% when None %}
+                    {% endmatch %}
+                    {% match feed.last_fetch_duration_ms %}
+                    {% when Some with (ms) %}
+                    <span class="mono">({{ ms }} ms)</span>
+                    {% when None %}
+                    {% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Conditional Cache Headers</th>
+                <td class="mono">
+                    ETag: {% match feed.etag %}{% when Some with (e) %}{{ e }}{% when None %}&mdash;{% endmatch %}
+                    &middot;
+                    Last-Modified: {% match feed.last_modified %}{% when Some with (lm) %}{{ lm }}{% when None %}&mdash;{% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Total Discovered Articles</th>
+                <td><a href="/articles?feed_id={{ feed.id }}"><strong>{{ feed.article_count }}</strong> articles</a></td>
+            </tr>
+            {% match feed.last_error %}
+            {% when Some with (err) %}
+            <tr>
+                <th>Last Error</th>
+                <td class="mono" style="color: var(--danger);">{{ err }} (consecutive failures: {{ feed.consecutive_failures }})</td>
+            </tr>
+            {% when None %}
+            {% endmatch %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Recent Fetch History ({{ runs.len() }})</h2>
+    {% if runs.is_empty() %}
+    <div class="empty-state">
+        <p>No fetch runs recorded yet for this feed.</p>
+    </div>
+    {% else %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Started</th>
+                    <th>Trigger</th>
+                    <th>Status</th>
+                    <th>HTTP</th>
+                    <th>Duration</th>
+                    <th>Entries (Seen / +New / Updated / Unchanged)</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in runs %}
+                <tr>
+                    <td class="mono">{{ r.started_at_display }}</td>
+                    <td><span class="badge badge-disabled">{{ r.run.trigger_type }}</span></td>
+                    <td>
+                        {% if r.run.status == "success" || r.run.status == "unchanged" %}
+                        <span class="badge badge-enabled">{{ r.run.status }}</span>
+                        {% else if r.run.status == "running" %}
+                        <span class="badge badge-env">running</span>
+                        {% else %}
+                        <span class="badge badge-danger">{{ r.run.status }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="mono">
+                        {% match r.run.http_status %}
+                        {% when Some with (code) %}{{ code }}{% when None %}&mdash;{% endmatch %}
+                    </td>
+                    <td class="mono">
+                        {% match r.run.duration_ms %}
+                        {% when Some with (ms) %}{{ ms }} ms{% when None %}&mdash;{% endmatch %}
+                    </td>
+                    <td class="mono">
+                        {{ r.run.entries_seen }} seen / +{{ r.run.articles_inserted }} new / {{ r.run.articles_updated }} upd / {{ r.run.articles_unchanged }} unch
+                        {% if r.run.entries_truncated > 0 %}
+                        <span class="form-help">({{ r.run.entries_truncated }} truncated)</span>
+                        {% endif %}
+                    </td>
+                    <td class="mono">
+                        {% match r.run.error_message %}
+                        {% when Some with (err) %}
+                        <span style="color: var(--danger);">{{ err }}</span>
+                        {% when None %}
+                        <span class="form-help">&mdash;</span>
+                        {% endmatch %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Recent Articles from this Feed ({{ recent_articles.len() }})</h2>
+    {% if recent_articles.is_empty() %}
+    <div class="empty-state">
+        <p>No articles stored for this feed yet.</p>
+    </div>
+    {% else %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Published</th>
+                    <th>Extraction</th>
+                    <th>Original Link</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for art in recent_articles %}
+                <tr>
+                    <td><a href="/articles/{{ art.row.id }}"><strong>{{ art.row.title }}</strong></a></td>
+                    <td class="mono">{{ art.published_display }}</td>
+                    <td>
+                        {% if art.row.extraction_status == "completed" %}
+                        <span class="badge badge-enabled">completed</span>
+                        {% else if art.row.extraction_status == "fallback" %}
+                        <span class="badge badge-env">fallback</span>
+                        {% else if art.row.extraction_status == "failed" %}
+                        <span class="badge badge-danger">failed</span>
+                        {% else %}
+                        <span class="badge badge-disabled">{{ art.row.extraction_status }}</span>
+                        {% endif %}
+                    </td>
+                    <td><a class="mono" href="{{ art.row.canonical_url }}" target="_blank" rel="noopener noreferrer">Source &rarr;</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,152 @@
+use sha2::{Digest, Sha256};
+use url::Url;
+
+use crate::error::AppResult;
+use crate::feeds::validation::parse_and_validate_http_url;
+
+/// Known tracking query parameters that are safe to remove without altering
+/// article identity on publisher websites.
+const TRACKING_QUERY_PARAMS: &[&str] = &[
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "utm_name",
+    "utm_reader",
+    "utm_viz_id",
+    "utm_pubreferrer",
+    "utm_swu",
+    "fbclid",
+    "gclid",
+    "dclid",
+    "msclkid",
+    "twclid",
+    "mc_cid",
+    "mc_eid",
+    "oly_enc_id",
+    "oly_anon_id",
+    "_hsenc",
+    "_hsmi",
+    "hsCtaTracking",
+    "rb_clickid",
+    "vero_id",
+    "wickedid",
+    "yclid",
+    "igshid",
+    "si",
+];
+
+/// Resolve a candidate article link (which may be relative or protocol-relative)
+/// against a base URL, validate that it is a safe HTTP/HTTPS URL, strip
+/// fragments and known tracking parameters, and sort remaining query parameters
+/// only in a conservative manner that preserves distinct article parameters.
+pub fn canonicalize_article_url(raw_link: &str, base_url: Option<&Url>) -> AppResult<String> {
+    let trimmed = raw_link.trim();
+    if trimmed.is_empty() {
+        return Err(crate::error::AppError::Validation(
+            "Article URL is empty.".to_string(),
+        ));
+    }
+
+    let resolved = match Url::parse(trimmed) {
+        Ok(u) => u,
+        Err(url::ParseError::RelativeUrlWithoutBase) => {
+            let Some(base) = base_url else {
+                return Err(crate::error::AppError::Validation(format!(
+                    "Relative article URL '{trimmed}' cannot be resolved without a base URL."
+                )));
+            };
+            base.join(trimmed).map_err(|e| {
+                crate::error::AppError::Validation(format!(
+                    "Failed to resolve relative article URL '{trimmed}': {e}"
+                ))
+            })?
+        }
+        Err(e) => {
+            return Err(crate::error::AppError::Validation(format!(
+                "Invalid article URL '{trimmed}': {e}"
+            )));
+        }
+    };
+
+    let mut validated = parse_and_validate_http_url(resolved.as_str(), "Article URL")?;
+
+    // Strip URL fragment (#section) so anchor links to the same article deduplicate
+    validated.set_fragment(None);
+
+    // Strip trailing dot on host if present
+    if let Some(host) = validated.host_str().map(str::to_string)
+        && host.ends_with('.')
+    {
+        let stripped = host.trim_end_matches('.');
+        let _ = validated.set_host(Some(stripped));
+    }
+
+    // Conservatively remove known tracking parameters while preserving all other
+    // query parameters in their original order.
+    if validated.query().is_some() {
+        let kept_pairs: Vec<(String, String)> = validated
+            .query_pairs()
+            .filter(|(k, _)| {
+                let lower = k.to_ascii_lowercase();
+                !TRACKING_QUERY_PARAMS.contains(&lower.as_str())
+            })
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+
+        if kept_pairs.is_empty() {
+            validated.set_query(None);
+        } else {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in kept_pairs {
+                serializer.append_pair(&k, &v);
+            }
+            let new_query = serializer.finish();
+            validated.set_query(Some(&new_query));
+        }
+    }
+
+    Ok(validated.to_string())
+}
+
+/// Normalize whitespace in titles or author strings.
+pub fn normalize_whitespace(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for word in input.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
+/// Strip HTML tags to plain text and collapse whitespace for stable SHA-256
+/// content hashing and plain-text previews.
+pub fn html_to_normalized_text(html: &str) -> String {
+    let doc = dom_query::Document::from(html);
+    let raw_text = doc.text();
+    normalize_whitespace(&raw_text)
+}
+
+/// Compute a hex-encoded SHA-256 content hash over normalized text content so
+/// insignificant HTML whitespace variations do not alter the hash.
+pub fn compute_content_hash(html_or_text: &str) -> String {
+    let normalized = html_to_normalized_text(html_or_text);
+    let source = if normalized.is_empty() {
+        normalize_whitespace(html_or_text)
+    } else {
+        normalized
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
+}

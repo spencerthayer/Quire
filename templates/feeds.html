@@ -4,9 +4,23 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Feeds</h1>
-    <p>Configure RSS and Atom feeds persisted in SQLite. Automatic background polling is scheduled for Phase 2.</p>
+    <div>
+        <h1>Feeds</h1>
+        <p>Configure RSS and Atom subscriptions, trigger manual fetches, and inspect scheduling diagnostics.</p>
+    </div>
+    {% if !feeds.is_empty() %}
+    <form class="inline-form" method="post" action="/feeds/fetch-all">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn btn-primary" type="submit">Fetch All Enabled</button>
+    </form>
+    {% endif %}
 </div>
+
+{% if any_fetch_running %}
+<div class="alert alert-warning" role="status">
+    One or more feed fetches are currently running in the background. <a href="/feeds">Refresh this page</a> to view updated results.
+</div>
+{% endif %}
 
 {% match flash_message %}
 {% when Some with (msg) %}
@@ -41,10 +55,18 @@
                 <label for="description">Description (optional)</label>
                 <input id="description" name="description" type="text" maxlength="1000" placeholder="Technology news and analysis" value="{{ form_description }}">
             </div>
+            <div class="form-group">
+                <label for="fetch_interval_minutes">Fetch Interval Override (min, optional)</label>
+                <input id="fetch_interval_minutes" name="fetch_interval_minutes" type="number" min="5" max="10080" placeholder="Default ({{ default_interval_minutes }} min)" value="{{ form_fetch_interval }}">
+            </div>
+            <div class="form-group">
+                <label for="max_entries_override">Max Entries Override (optional)</label>
+                <input id="max_entries_override" name="max_entries_override" type="number" min="1" max="5000" placeholder="Default ({{ default_max_entries }})" value="{{ form_max_entries }}">
+            </div>
         </div>
         <div class="checkbox-row">
             <input id="enabled" name="enabled" type="checkbox" value="true" {% if form_enabled %}checked{% endif %}>
-            <label for="enabled">Enable feed immediately</label>
+            <label for="enabled">Enable automatic fetching</label>
         </div>
         <button class="btn btn-primary" type="submit">Add Feed</button>
     </form>
@@ -61,60 +83,99 @@
         <table>
             <thead>
                 <tr>
-                    <th>Name</th>
-                    <th>Feed URL</th>
-                    <th>Status</th>
-                    <th>Last Fetch</th>
+                    <th>Feed</th>
+                    <th>Schedule &amp; Status</th>
+                    <th>Articles</th>
+                    <th>Last Attempt / Success</th>
+                    <th>Last Result</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
-                {% for feed in feeds %}
+                {% for item in feeds %}
                 <tr>
                     <td>
-                        <strong>{{ feed.name }}</strong>
-                        {% match feed.website_url %}
+                        <a href="/feeds/{{ item.feed.id }}"><strong>{{ item.feed.name }}</strong></a>
+                        <div class="mono">{{ item.feed.feed_url }}</div>
+                        {% match item.feed.website_url %}
                         {% when Some with (site) %}
-                        <div><a class="mono" href="{{ site }}" target="_blank" rel="noopener noreferrer">{{ site }}</a></div>
+                        <div class="form-help"><a href="{{ site }}" target="_blank" rel="noopener noreferrer">{{ site }}</a></div>
                         {% when None %}
                         {% endmatch %}
-                        {% match feed.description %}
+                        {% match item.feed.description %}
                         {% when Some with (desc) %}
                         <div class="form-help">{{ desc }}</div>
                         {% when None %}
                         {% endmatch %}
                     </td>
-                    <td class="mono">{{ feed.feed_url }}</td>
                     <td>
-                        {% if feed.enabled %}
+                        {% if item.feed.enabled %}
                         <span class="badge badge-enabled">Enabled</span>
                         {% else %}
                         <span class="badge badge-disabled">Disabled</span>
                         {% endif %}
+                        {% if item.feed.fetch_in_progress %}
+                        <span class="badge badge-env">Fetching</span>
+                        {% endif %}
+                        <div class="form-help">
+                            Interval:
+                            {% match item.feed.fetch_interval_minutes %}
+                            {% when Some with (mins) %}
+                            {{ mins }}m (override)
+                            {% when None %}
+                            {{ default_interval_minutes }}m (default)
+                            {% endmatch %}
+                        </div>
+                        <div class="form-help">
+                            Next: <span class="mono">{{ item.next_scheduled_display }}</span>
+                        </div>
                     </td>
                     <td>
-                        {% match feed.last_successful_fetch_at %}
-                        {% when Some with (ts) %}
-                        <span class="mono">{{ ts }}</span>
+                        <a href="/articles?feed_id={{ item.feed.id }}"><strong>{{ item.feed.article_count }}</strong> stored</a>
+                        <div class="form-help">Last run: +{{ item.feed.last_inserted_count }} / {{ item.feed.last_discovered_count }} seen</div>
+                    </td>
+                    <td>
+                        <div class="form-help">Attempt: <span class="mono">{{ item.last_attempted_display }}</span></div>
+                        <div class="form-help">Success: <span class="mono">{{ item.last_successful_display }}</span></div>
+                    </td>
+                    <td>
+                        {% if item.feed.last_fetch_status == "success" || item.feed.last_fetch_status == "unchanged" %}
+                        <span class="badge badge-enabled">{{ item.feed.last_fetch_status }}</span>
+                        {% else if item.feed.last_fetch_status == "running" || item.feed.last_fetch_status == "queued" %}
+                        <span class="badge badge-env">{{ item.feed.last_fetch_status }}</span>
+                        {% else if item.feed.last_fetch_status == "failed" %}
+                        <span class="badge badge-danger">failed</span>
+                        {% else %}
+                        <span class="badge badge-disabled">{{ item.feed.last_fetch_status }}</span>
+                        {% endif %}
+                        {% match item.feed.last_http_status %}
+                        {% when Some with (code) %}
+                        <span class="mono">HTTP {{ code }}</span>
                         {% when None %}
-                        <span class="form-help">Never fetched</span>
                         {% endmatch %}
-                        {% match feed.last_error %}
+                        {% match item.feed.last_error %}
                         {% when Some with (err) %}
-                        <div class="alert-error mono">{{ err }}</div>
+                        <div class="form-help" style="color: var(--danger);">{{ err }}</div>
                         {% when None %}
                         {% endmatch %}
                     </td>
                     <td>
                         <div class="actions-cell">
-                            <a class="btn btn-secondary btn-sm" href="/feeds/{{ feed.id }}/edit">Edit</a>
-                            <form class="inline-form" method="post" action="/feeds/{{ feed.id }}/toggle">
+                            <form class="inline-form" method="post" action="/feeds/{{ item.feed.id }}/fetch">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                <button class="btn btn-secondary btn-sm" type="submit">
-                                    {% if feed.enabled %}Disable{% else %}Enable{% endif %}
+                                <button class="btn btn-primary btn-sm" type="submit" {% if item.feed.fetch_in_progress %}disabled{% endif %}>
+                                    {% if item.feed.fetch_in_progress %}Running{% else %}Fetch Now{% endif %}
                                 </button>
                             </form>
-                            <form class="inline-form" method="post" action="/feeds/{{ feed.id }}/delete" onsubmit="return confirm('Delete feed {{ feed.name }}? This will also remove any stored articles for this feed.');">
+                            <a class="btn btn-secondary btn-sm" href="/feeds/{{ item.feed.id }}">Details</a>
+                            <a class="btn btn-secondary btn-sm" href="/feeds/{{ item.feed.id }}/edit">Edit</a>
+                            <form class="inline-form" method="post" action="/feeds/{{ item.feed.id }}/toggle">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button class="btn btn-secondary btn-sm" type="submit">
+                                    {% if item.feed.enabled %}Disable{% else %}Enable{% endif %}
+                                </button>
+                            </form>
+                            <form class="inline-form" method="post" action="/feeds/{{ item.feed.id }}/delete" onsubmit="return confirm('Delete feed {{ item.feed.name }}? Articles exclusive to this feed will be removed.');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                 <input type="hidden" name="confirm" value="yes">
                                 <button class="btn btn-danger btn-sm" type="submit">Delete</button>

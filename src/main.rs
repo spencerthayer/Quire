@@ -52,23 +52,41 @@ async fn main() -> ExitCode {
         }
     };
 
-    let state = AppState::new(pool, config);
+    let state = AppState::new(pool.clone(), config);
+    if let Err(err) = state.coordinator.recover_startup_state().await {
+        error!(error = ?err, "Failed to recover interrupted ingestion state on startup");
+        return ExitCode::FAILURE;
+    }
+
+    let coordinator = state.coordinator.clone();
+    let scheduler_handle = coordinator.spawn_background_loop(Duration::from_secs(30));
+
     let app = create_router(state);
 
     let listener = match tokio::net::TcpListener::bind(bind_addr).await {
         Ok(l) => l,
         Err(err) => {
             error!(addr = %bind_addr, error = ?err, "Failed to bind TCP listener");
+            coordinator.signal_shutdown();
+            let _ = scheduler_handle.await;
             return ExitCode::FAILURE;
         }
     };
 
     info!(addr = %bind_addr, "Quire HTTP server listening");
 
-    if let Err(err) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
+    let serve_res = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            coordinator.signal_shutdown();
+        })
+        .await;
+
+    // Wait up to 10 seconds for the background scheduler loop to finish active work
+    let _ = tokio::time::timeout(Duration::from_secs(10), scheduler_handle).await;
+    pool.close().await;
+
+    if let Err(err) = serve_res {
         error!(error = ?err, "HTTP server exited with error");
         return ExitCode::FAILURE;
     }

@@ -4,16 +4,60 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Articles</h1>
-    <p>Collected articles stored in SQLite. Feed polling and full-text extraction are scheduled for Phase 2.</p>
+    <div>
+        <h1>Articles</h1>
+        <p>Browse discovered articles stored in SQLite, filter by feed or extraction status, and inspect extracted content.</p>
+    </div>
 </div>
 
 <div class="card">
-    <h2>Stored Articles ({{ articles.len() }})</h2>
+    <h2>Filter Articles</h2>
+    <form method="get" action="/articles">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="feed_id">Source Feed</label>
+                <select id="feed_id" name="feed_id">
+                    <option value="">All Feeds</option>
+                    {% for f in feeds %}
+                    <option value="{{ f.id }}" {% if selected_feed_id == f.id %}selected{% endif %}>{{ f.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="status">Extraction Status</label>
+                <select id="status" name="status">
+                    <option value="">All Statuses</option>
+                    <option value="completed" {% if selected_status == "completed" %}selected{% endif %}>Completed (Full Text)</option>
+                    <option value="fallback" {% if selected_status == "fallback" %}selected{% endif %}>Fallback (Feed Summary)</option>
+                    <option value="pending" {% if selected_status == "pending" %}selected{% endif %}>Pending</option>
+                    <option value="processing" {% if selected_status == "processing" %}selected{% endif %}>Processing</option>
+                    <option value="failed" {% if selected_status == "failed" %}selected{% endif %}>Failed</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="published_date">Published Date (UTC)</label>
+                <input id="published_date" name="published_date" type="date" value="{{ selected_published_date }}">
+            </div>
+            <div class="form-group">
+                <label for="discovered_date">Discovered Date (UTC)</label>
+                <input id="discovered_date" name="discovered_date" type="date" value="{{ selected_discovered_date }}">
+            </div>
+        </div>
+        <div class="actions-cell">
+            <button class="btn btn-primary" type="submit">Apply Filters</button>
+            <a class="btn btn-secondary" href="/articles">Clear</a>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <div class="card-header-row">
+        <h2>Stored Articles ({{ total_count }})</h2>
+        <span class="form-help">Page {{ page }} of {{ total_pages }}</span>
+    </div>
     {% if articles.is_empty() %}
     <div class="empty-state">
-        <p>No articles stored in the database yet.</p>
-        <p class="form-help">Once RSS ingestion is enabled in Phase 2, collected articles will appear here.</p>
+        <p>No articles match the current filter criteria.</p>
     </div>
     {% else %}
     <div class="table-wrap">
@@ -23,43 +67,68 @@
                     <th>Title</th>
                     <th>Feed</th>
                     <th>Author</th>
-                    <th>Published (UTC)</th>
-                    <th>Extraction Status</th>
+                    <th>Published</th>
+                    <th>Discovered</th>
+                    <th>Extraction</th>
+                    <th>Original</th>
                 </tr>
             </thead>
             <tbody>
-                {% for article in articles %}
+                {% for item in articles %}
                 <tr>
                     <td>
-                        <a href="{{ article.canonical_url }}" target="_blank" rel="noopener noreferrer"><strong>{{ article.title }}</strong></a>
-                        {% match article.description %}
-                        {% when Some with (desc) %}
-                        <div class="form-help">{{ desc }}</div>
-                        {% when None %}
-                        {% endmatch %}
+                        <a href="/articles/{{ item.row.id }}"><strong>{{ item.row.title }}</strong></a>
                     </td>
-                    <td>{{ article.feed_name }}</td>
+                    <td><a href="/feeds/{{ item.row.feed_id }}">{{ item.row.feed_name }}</a></td>
                     <td>
-                        {% match article.author %}
+                        {% match item.row.author %}
                         {% when Some with (author) %}
                         {{ author }}
                         {% when None %}
                         <span class="form-help">&mdash;</span>
                         {% endmatch %}
                     </td>
-                    <td class="mono">
-                        {% match article.published_at %}
-                        {% when Some with (pub_at) %}
-                        {{ pub_at }}
-                        {% when None %}
-                        {{ article.discovered_at }}
-                        {% endmatch %}
+                    <td class="mono">{{ item.published_display }}</td>
+                    <td class="mono">{{ item.discovered_display }}</td>
+                    <td>
+                        {% if item.row.extraction_status == "completed" %}
+                        <span class="badge badge-enabled">completed</span>
+                        {% else if item.row.extraction_status == "fallback" %}
+                        <span class="badge badge-env">fallback</span>
+                        {% else if item.row.extraction_status == "failed" %}
+                        <span class="badge badge-danger">failed</span>
+                        {% else %}
+                        <span class="badge badge-disabled">{{ item.row.extraction_status }}</span>
+                        {% endif %}
+                        {% if item.row.has_extracted_content %}
+                        <div class="form-help">Readable</div>
+                        {% else %}
+                        <div class="form-help">No body</div>
+                        {% endif %}
                     </td>
-                    <td><span class="badge badge-disabled">{{ article.extraction_status }}</span></td>
+                    <td>
+                        <a class="mono" href="{{ item.row.canonical_url }}" target="_blank" rel="noopener noreferrer">Source &rarr;</a>
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+    </div>
+
+    <div class="pagination">
+        <div>
+            {% if has_prev %}
+            <a class="btn btn-secondary btn-sm" href="{{ prev_page_url }}">&larr; Previous Page</a>
+            {% endif %}
+        </div>
+        <div class="form-help">
+            Showing {{ articles.len() }} of {{ total_count }} articles
+        </div>
+        <div>
+            {% if has_next %}
+            <a class="btn btn-secondary btn-sm" href="{{ next_page_url }}">Next Page &rarr;</a>
+            {% endif %}
+        </div>
     </div>
     {% endif %}
 </div>

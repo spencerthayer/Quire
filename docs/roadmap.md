@@ -22,34 +22,34 @@ Establish the Rust application architecture, SQLite persistence, web interface, 
 
 ---
 
-## Phase 2 — RSS Ingestion
+## Phase 2 — RSS Ingestion (Completed)
 
-Implement automated and manual feed fetching, article discovery, full-text readability extraction, and deduplication.
+Implement automated and manual feed fetching, article discovery, full-text readability extraction, persistent SQLite job queuing, and deduplication.
 
 ### Required Features
-* [ ] Asynchronous HTTP feed fetching (`reqwest`) with strict connect/read timeouts, response size limits, and SSRF IP verification on resolved DNS records.
-* [ ] RSS and Atom parsing using `feed-rs` with character-encoding normalization.
-* [ ] Canonical URL normalization (stripping tracking query parameters such as `utm_*` and resolving relative links).
-* [ ] Multi-layered deduplication across feeds using `(feed_id, external_guid)`, `canonical_url`, and SHA-256 `content_hash`.
-* [ ] Full-article HTML extraction using `dom_smoothie` with automatic fallback to feed summaries when extraction fails or times out.
-* [ ] HTML sanitization of extracted content prior to storage and rendering.
-* [ ] Background polling scheduler and manual "Fetch Now" trigger in the web UI.
-* [ ] Recording `last_successful_fetch_at`, `last_attempted_fetch_at`, and `last_error` per feed.
+* [x] Asynchronous HTTP feed fetching (`reqwest`) with strict connect/read timeouts, streaming response size limits, redirect validation, and SSRF IP verification on resolved DNS records.
+* [x] Conditional HTTP fetching (`If-None-Match` / `ETag` and `If-Modified-Since` / `Last-Modified` with `304 Not Modified` handling).
+* [x] Bounded exponential backoff retries with jitter and `Retry-After` header support.
+* [x] RSS 2.0, RSS 1.0/RDF, and Atom 1.0 parsing using `feed-rs` with character-encoding normalization and XXE/DTD entity rejection.
+* [x] Canonical URL normalization (resolving relative links, stripping fragments, and removing known tracking query parameters such as `utm_*`, `fbclid`, `gclid`).
+* [x] Multi-layered transactional deduplication across feeds using `canonical_url`, `(feed_id, external_guid)`, and `article_feed_sources` cross-feed associations, plus safe feed deletion that preserves shared articles.
+* [x] Persistent SQLite extraction queue (`article_extraction_jobs`) with crash recovery, atomic job claiming, and bounded retry schedules.
+* [x] Full-article HTML extraction using `dom_smoothie` with automatic fallback to sanitized feed summaries when extraction fails.
+* [x] HTML sanitization (`ammonia` + `dom_query`) and SHA-256 `content_hash` calculation over normalized text.
+* [x] Background polling scheduler and manual "Fetch Now" / "Fetch All Enabled" triggers in the web UI.
+* [x] Feed detail view (`GET /feeds/{id}`), execution history (`feed_fetch_runs` with 100-run retention), paginated/filtered article browser (`GET /articles`), and article reader view (`GET /articles/{id}`) with manual extraction retry/refresh.
 
-### Optional Enhancements
+### Optional Enhancements (Deferred to Phase 3+)
 * [ ] OPML subscription import and export.
-* [ ] Per-feed custom `User-Agent` and concurrency overrides.
-* [ ] Conditional HTTP fetching (`ETag` and `If-Modified-Since` caching).
+* [ ] Per-feed custom `User-Agent` overrides.
 
 ---
 
-## Phase 3 — Article Library
+## Phase 3 — Article Library & Search
 
-Build rich article browsing, filtering, categorization, and retention management in the web interface.
+Build rich article search, categorization, tags, and retention management in the web interface.
 
 ### Required Features
-* [ ] Paginated article library view with filtering by feed, extraction status, and publication date range.
-* [ ] In-app article reader view displaying extracted full text and original metadata.
 * [ ] Full-text search across article titles, authors, and extracted content (SQLite FTS5).
 * [ ] Feed categories/tags and source priority weighting.
 * [ ] Configurable article retention and cleanup policies to bound disk usage.

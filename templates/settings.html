@@ -4,8 +4,10 @@
 
 {% block content %}
 <div class="page-header">
-    <h1>Settings</h1>
-    <p>Configuration precedence: <strong>Environment variables</strong> override <strong>Database (Web UI)</strong> settings, which override <strong>Defaults</strong>. Secret values are never stored in SQLite or displayed in the browser.</p>
+    <div>
+        <h1>Settings</h1>
+        <p>Configuration precedence: <strong>Environment variables</strong> override <strong>Database (Web UI)</strong> settings, which override <strong>Defaults</strong>. Secret values are never stored in SQLite or displayed in the browser.</p>
+    </div>
 </div>
 
 {% match flash_message %}
@@ -65,7 +67,7 @@
 
 <div class="card">
     <h2>Update Nonsecret Database Settings</h2>
-    <p class="form-help">Settings controlled by an active environment variable are locked and cannot be overridden here.</p>
+    <p class="form-help">Changes take effect immediately on the next scheduler or extraction cycle. Settings controlled by an active environment variable are locked and cannot be overridden through the browser.</p>
     <form method="post" action="/settings">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-grid">
@@ -74,6 +76,79 @@
                 <input id="timezone" name="timezone" type="text" value="{{ form_timezone }}" {% if timezone_locked %}disabled{% endif %} placeholder="America/Los_Angeles">
                 {% if timezone_locked %}
                 <div class="form-help">Locked by environment variable <span class="mono">QUIRE_TIMEZONE</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="fetch_enabled">Automatic Fetching Enabled (<span class="mono">QUIRE_FETCH_ENABLED</span>)</label>
+                <select id="fetch_enabled" name="fetch_enabled" {% if fetch_enabled_locked %}disabled{% endif %}>
+                    <option value="true" {% if form_fetch_enabled == "true" %}selected{% endif %}>Enabled (true)</option>
+                    <option value="false" {% if form_fetch_enabled == "false" %}selected{% endif %}>Paused (false)</option>
+                </select>
+                {% if fetch_enabled_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_FETCH_ENABLED</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="fetch_interval_minutes">Default Fetch Interval Minutes (<span class="mono">QUIRE_FETCH_INTERVAL_MINUTES</span>)</label>
+                <input id="fetch_interval_minutes" name="fetch_interval_minutes" type="number" min="5" max="10080" value="{{ form_fetch_interval_minutes }}" {% if fetch_interval_locked %}disabled{% endif %}>
+                {% if fetch_interval_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_FETCH_INTERVAL_MINUTES</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="fetch_concurrency">Max Concurrent Feed Requests (<span class="mono">QUIRE_FETCH_CONCURRENCY</span>)</label>
+                <input id="fetch_concurrency" name="fetch_concurrency" type="number" min="1" max="32" value="{{ form_fetch_concurrency }}" {% if fetch_concurrency_locked %}disabled{% endif %}>
+                {% if fetch_concurrency_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_FETCH_CONCURRENCY</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="extraction_concurrency">Max Concurrent Extractions (<span class="mono">QUIRE_EXTRACTION_CONCURRENCY</span>)</label>
+                <input id="extraction_concurrency" name="extraction_concurrency" type="number" min="1" max="32" value="{{ form_extraction_concurrency }}" {% if extraction_concurrency_locked %}disabled{% endif %}>
+                {% if extraction_concurrency_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_EXTRACTION_CONCURRENCY</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="feed_request_timeout_seconds">Feed Request Timeout Seconds (<span class="mono">QUIRE_FEED_REQUEST_TIMEOUT_SECONDS</span>)</label>
+                <input id="feed_request_timeout_seconds" name="feed_request_timeout_seconds" type="number" min="5" max="300" value="{{ form_feed_timeout }}" {% if feed_timeout_locked %}disabled{% endif %}>
+                {% if feed_timeout_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_FEED_REQUEST_TIMEOUT_SECONDS</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="article_request_timeout_seconds">Article Request Timeout Seconds (<span class="mono">QUIRE_ARTICLE_REQUEST_TIMEOUT_SECONDS</span>)</label>
+                <input id="article_request_timeout_seconds" name="article_request_timeout_seconds" type="number" min="5" max="300" value="{{ form_article_timeout }}" {% if article_timeout_locked %}disabled{% endif %}>
+                {% if article_timeout_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_ARTICLE_REQUEST_TIMEOUT_SECONDS</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="max_feed_response_bytes">Max Feed Response Bytes (<span class="mono">QUIRE_MAX_FEED_RESPONSE_BYTES</span>)</label>
+                <input id="max_feed_response_bytes" name="max_feed_response_bytes" type="number" min="65536" max="104857600" value="{{ form_max_feed_bytes }}" {% if max_feed_bytes_locked %}disabled{% endif %}>
+                {% if max_feed_bytes_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_MAX_FEED_RESPONSE_BYTES</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="max_article_response_bytes">Max Article Response Bytes (<span class="mono">QUIRE_MAX_ARTICLE_RESPONSE_BYTES</span>)</label>
+                <input id="max_article_response_bytes" name="max_article_response_bytes" type="number" min="65536" max="104857600" value="{{ form_max_article_bytes }}" {% if max_article_bytes_locked %}disabled{% endif %}>
+                {% if max_article_bytes_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_MAX_ARTICLE_RESPONSE_BYTES</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="max_feed_entries">Max Entries Per Feed Fetch (<span class="mono">QUIRE_MAX_FEED_ENTRIES</span>)</label>
+                <input id="max_feed_entries" name="max_feed_entries" type="number" min="1" max="5000" value="{{ form_max_feed_entries }}" {% if max_feed_entries_locked %}disabled{% endif %}>
+                {% if max_feed_entries_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_MAX_FEED_ENTRIES</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="fetch_max_attempts">Max HTTP Fetch Attempts (<span class="mono">QUIRE_FETCH_MAX_ATTEMPTS</span>)</label>
+                <input id="fetch_max_attempts" name="fetch_max_attempts" type="number" min="1" max="10" value="{{ form_fetch_max_attempts }}" {% if fetch_max_attempts_locked %}disabled{% endif %}>
+                {% if fetch_max_attempts_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_FETCH_MAX_ATTEMPTS</span>.</div>
                 {% endif %}
             </div>
             <div class="form-group">

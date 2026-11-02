@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+
+{% block title %}{{ article.title }} | Quire{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <div>
+        <h1>{{ article.title }}</h1>
+        <p>
+            From <a href="/feeds/{{ article.feed_id }}"><strong>{{ article.feed_name }}</strong></a>
+            {% match article.author %}
+            {% when Some with (author) %}
+            &middot; By {{ author }}
+            {% when None %}
+            {% endmatch %}
+            &middot; Published: <span class="mono">{{ published_display }}</span>
+        </p>
+    </div>
+    <div class="actions-cell">
+        <form class="inline-form" method="post" action="/articles/{{ article.id }}/extract">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-primary" type="submit" {% if article.extraction_status == "processing" %}disabled{% endif %}>
+                {% if article.extraction_status == "failed" %}
+                Retry Extraction
+                {% else if article.extraction_status == "processing" %}
+                Extracting...
+                {% else %}
+                Refresh Content
+                {% endif %}
+            </button>
+        </form>
+        <a class="btn btn-secondary" href="{{ article.canonical_url }}" target="_blank" rel="noopener noreferrer">Open Original URL &rarr;</a>
+        <a class="btn btn-secondary" href="/articles">Back to Articles</a>
+    </div>
+</div>
+
+{% match flash_message %}
+{% when Some with (msg) %}
+<div class="alert alert-success" role="status">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% if article.extraction_status == "fallback" %}
+<div class="alert alert-warning" role="status">
+    <strong>Fallback Content:</strong> Full-text extraction could not be completed; displaying the sanitized RSS/Atom summary instead.
+    {% match article.extraction_error %}
+    {% when Some with (err) %}
+    <div class="mono" style="margin-top: 0.35rem;">Reason: {{ err }}</div>
+    {% when None %}
+    {% endmatch %}
+</div>
+{% else if article.extraction_status == "failed" %}
+<div class="alert alert-error" role="alert">
+    <strong>Extraction Failed:</strong>
+    {% match article.extraction_error %}
+    {% when Some with (err) %}
+    <span class="mono">{{ err }}</span>
+    {% when None %}
+    <span>Unable to extract full article content.</span>
+    {% endmatch %}
+</div>
+{% else if article.extraction_status == "pending" || article.extraction_status == "processing" %}
+<div class="alert alert-warning" role="status">
+    Article extraction is currently <strong>{{ article.extraction_status }}</strong>. <a href="/articles/{{ article.id }}">Refresh this page</a> shortly.
+</div>
+{% endif %}
+
+<div class="card">
+    <h2>Extracted Article Content</h2>
+    {% match sanitized_body_html %}
+    {% when Some with (html) %}
+    <article class="article-reader">
+        {{ html|safe }}
+    </article>
+    {% when None %}
+    <div class="empty-state">
+        <p>No extracted content is currently stored for this article.</p>
+    </div>
+    {% endmatch %}
+</div>
+
+<div class="card">
+    <h2>Article &amp; Extraction Metadata</h2>
+    <table>
+        <tbody>
+            <tr>
+                <th>Canonical URL</th>
+                <td class="mono"><a href="{{ article.canonical_url }}" target="_blank" rel="noopener noreferrer">{{ article.canonical_url }}</a></td>
+            </tr>
+            <tr>
+                <th>Extraction Status</th>
+                <td>
+                    {% if article.extraction_status == "completed" %}
+                    <span class="badge badge-enabled">completed</span>
+                    {% else if article.extraction_status == "fallback" %}
+                    <span class="badge badge-env">fallback (summary)</span>
+                    {% else if article.extraction_status == "failed" %}
+                    <span class="badge badge-danger">failed</span>
+                    {% else %}
+                    <span class="badge badge-disabled">{{ article.extraction_status }}</span>
+                    {% endif %}
+                    (attempts: {{ article.extraction_attempts }})
+                </td>
+            </tr>
+            <tr>
+                <th>Discovered At</th>
+                <td class="mono">{{ discovered_display }}</td>
+            </tr>
+            <tr>
+                <th>Last Extraction Attempt</th>
+                <td class="mono">{{ last_attempt_display }}</td>
+            </tr>
+            <tr>
+                <th>Content SHA-256 Hash</th>
+                <td class="mono">
+                    {% match article.content_hash %}
+                    {% when Some with (h) %}{{ h }}{% when None %}&mdash;{% endmatch %}
+                </td>
+            </tr>
+            <tr>
+                <th>Discovered Across Feeds</th>
+                <td>
+                    {% for src in sources %}
+                    <div>
+                        <a href="/feeds/{{ src.feed_id }}"><strong>{{ src.feed_name }}</strong></a>
+                        {% match src.external_guid %}
+                        {% when Some with (g) %}
+                        <span class="form-help mono">(GUID: {{ g }})</span>
+                        {% when None %}
+                        {% endmatch %}
+                    </div>
+                    {% endfor %}
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+{% endblock %}
