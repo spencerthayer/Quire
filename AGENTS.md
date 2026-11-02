@@ -100,3 +100,17 @@ SQLite is the primary persistent store. Every database change must follow these 
 * `./repos/` contains cloned third-party reference projects (`RSSPub`, `kindle-daily-digest`, `condenseit`, `read-everything`, `RSSbrew`, `feedr`, `distillfeed`, `mcp-elevenreader`).
 * `./repos/` is excluded from Git via `/repos/` in `.gitignore` and `repos/.gitignore`. Never stage, commit, or submodule anything under `./repos/`.
 * **License Enforcement**: Quire is MIT-licensed. Never copy or translate code from `repos/RSSbrew` (`AGPL-3.0`) or `repos/read-everything` (no license).
+
+---
+
+## 9. Local Container (`./start`, `./stop`)
+
+Use these scripts for every local Docker run. Do not start or stop the local container with raw `docker compose` or `docker run` commands. Those skip `.env` loading and the `./_logs` capture.
+
+* **Start**: From the repository root, run `./start`. The script reads `./.env`, builds the image, and starts the container named `quire`. If `./.env` is missing, copy `.env.example` to `.env` first. Never commit `.env`.
+* **Logs**: `./start` follows container logs into `./_logs/quire-<UTC timestamp>.log` and points `./_logs/latest.log` at that file. When checking server behavior, read `./_logs/latest.log`. Do not commit `./_logs/`.
+* **Stop**: Run `./stop`. It stops the log follower and removes the container. The SQLite volume and the files under `./_logs/` remain.
+* **UI**: After `./start`, the web UI is at `http://localhost:8080` unless `QUIRE_PORT` in `.env` sets another host port.
+* **Scope**: `compose.yaml` still sets the in-container listen port (`8080`), data directory (`/data`), and database URL. Other `QUIRE_*` values from `./.env` are passed into the container.
+
+The first `./start` compiles the Rust binary inside Docker and takes longer than later runs.
