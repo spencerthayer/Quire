@@ -1,0 +1,49 @@
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+.fseventsd
+.TemporaryItems
+.apdisk
+Icon?
+Icon\r
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Nested repos / clones
+codebase/
+
+# Dependencies
+node_modules/
+vendor/
+bower_components/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build output
+dist/
+build/
+.cache/
+*.log
+
+# Editors / tools
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+*.tmp
+*.bak
