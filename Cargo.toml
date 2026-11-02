@@ -1,0 +1,40 @@
+[package]
+name = "quire"
+version = "0.1.0"
+edition = "2024"
+description = "A self-hosted RSS aggregation, AI curation, and automated publishing platform written in Rust."
+license = "MIT"
+repository = "https://github.com/spencerthayer/Quire"
+
+[dependencies]
+anyhow = "1.0"
+askama = "0.16"
+axum = { version = "0.8", features = ["macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+dom_smoothie = "0.19"
+epub-builder = "0.8"
+feed-rs = "3.0"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "derive", "chrono"] }
+thiserror = "2.0"
+tokio = { version = "1.52", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2.5"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3.27"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

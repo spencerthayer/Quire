@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard | Quire{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Dashboard</h1>
+    <p>System overview for Quire v{{ app_version }}.</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">Configured Feeds</div>
+        <div class="stat-value">{{ counts.total_feeds }}</div>
+        <div class="stat-meta">{{ counts.enabled_feeds }} enabled</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Collected Articles</div>
+        <div class="stat-value">{{ counts.total_articles }}</div>
+        <div class="stat-meta">Stored in SQLite</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Generated Editions</div>
+        <div class="stat-value">{{ counts.total_editions }}</div>
+        <div class="stat-meta">Publications archive</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">Database Status</div>
+        <div class="stat-value">{% if db_health.ok %}Healthy{% else %}Degraded{% endif %}</div>
+        <div class="stat-meta">WAL: {{ db_health.journal_mode }} &middot; FK: {% if db_health.foreign_keys_enabled %}on{% else %}off{% endif %}</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Application Status</h2>
+    <table>
+        <tbody>
+            <tr>
+                <th>Application</th>
+                <td>Quire v{{ app_version }} (Phase 1 Foundation)</td>
+            </tr>
+            <tr>
+                <th>HTTP Status</th>
+                <td><span class="badge badge-enabled">Online</span></td>
+            </tr>
+            <tr>
+                <th>Database Engine</th>
+                <td>SQLite (<span class="mono">{{ database_url }}</span>)</td>
+            </tr>
+            <tr>
+                <th>Configured Timezone</th>
+                <td><span class="mono">{{ timezone }}</span></td>
+            </tr>
+            <tr>
+                <th>Health Endpoint</th>
+                <td><a class="mono" href="/health">GET /health</a></td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Quick Actions</h2>
+    <p>Manage RSS and Atom feed subscriptions or inspect runtime settings.</p>
+    <div class="actions-cell">
+        <a class="btn btn-primary" href="/feeds">Manage Feeds</a>
+        <a class="btn btn-secondary" href="/articles">View Articles</a>
+        <a class="btn btn-secondary" href="/editions">View Editions</a>
+        <a class="btn btn-secondary" href="/settings">View Settings</a>
+    </div>
+</div>
+{% endblock %}

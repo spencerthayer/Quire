@@ -19,6 +19,21 @@ Desktop.ini
 
 # Nested repos / clones
 codebase/
+/repos/
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# SQLite / runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Dependencies
 node_modules/

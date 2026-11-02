@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block title %}Settings | Quire{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Settings</h1>
+    <p>Configuration precedence: <strong>Environment variables</strong> override <strong>Database (Web UI)</strong> settings, which override <strong>Defaults</strong>. Secret values are never stored in SQLite or displayed in the browser.</p>
+</div>
+
+{% match flash_message %}
+{% when Some with (msg) %}
+<div class="alert alert-success" role="status">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% match error_message %}
+{% when Some with (err) %}
+<div class="alert alert-error" role="alert">{{ err }}</div>
+{% when None %}
+{% endmatch %}
+
+<div class="card">
+    <h2>Effective Configuration</h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Setting</th>
+                    <th>Environment Variable</th>
+                    <th>Current Value</th>
+                    <th>Source</th>
+                    <th>Phase Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in settings %}
+                <tr>
+                    <td>
+                        <strong>{{ item.label }}</strong>
+                        <div class="form-help">{{ item.description }}</div>
+                    </td>
+                    <td class="mono">{{ item.env_var }}</td>
+                    <td class="mono">
+                        {% if item.value.is_empty() %}
+                        <span class="form-help">(not set)</span>
+                        {% else %}
+                        {{ item.value }}
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.source.is_env_locked() %}
+                        <span class="badge badge-env">Environment Variable (Locked)</span>
+                        {% else %}
+                        <span class="badge badge-db">{{ item.source.label() }}</span>
+                        {% endif %}
+                    </td>
+                    <td><span class="form-help">{{ item.phase_status }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Update Nonsecret Database Settings</h2>
+    <p class="form-help">Settings controlled by an active environment variable are locked and cannot be overridden here.</p>
+    <form method="post" action="/settings">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="timezone">Application Timezone (<span class="mono">QUIRE_TIMEZONE</span>)</label>
+                <input id="timezone" name="timezone" type="text" value="{{ form_timezone }}" {% if timezone_locked %}disabled{% endif %} placeholder="America/Los_Angeles">
+                {% if timezone_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_TIMEZONE</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="ai_provider">AI Provider (<span class="mono">QUIRE_AI_PROVIDER</span>)</label>
+                <input id="ai_provider" name="ai_provider" type="text" value="{{ form_ai_provider }}" {% if ai_provider_locked %}disabled{% endif %} placeholder="ollama / openai / openrouter">
+                {% if ai_provider_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_AI_PROVIDER</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="ai_base_url">AI Base URL (<span class="mono">QUIRE_AI_BASE_URL</span>)</label>
+                <input id="ai_base_url" name="ai_base_url" type="url" value="{{ form_ai_base_url }}" {% if ai_base_url_locked %}disabled{% endif %} placeholder="http://ollama:11434/v1">
+                {% if ai_base_url_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_AI_BASE_URL</span>.</div>
+                {% endif %}
+            </div>
+            <div class="form-group">
+                <label for="ai_model">AI Model (<span class="mono">QUIRE_AI_MODEL</span>)</label>
+                <input id="ai_model" name="ai_model" type="text" value="{{ form_ai_model }}" {% if ai_model_locked %}disabled{% endif %} placeholder="llama3.2:3b">
+                {% if ai_model_locked %}
+                <div class="form-help">Locked by environment variable <span class="mono">QUIRE_AI_MODEL</span>.</div>
+                {% endif %}
+            </div>
+        </div>
+        <button class="btn btn-primary" type="submit">Save Database Settings</button>
+    </form>
+</div>
+{% endblock %}

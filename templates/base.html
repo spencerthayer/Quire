@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Quire{% endblock %}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="header-inner">
+            <div class="brand">
+                <a class="brand-title" href="/">Quire</a>
+                <span class="brand-version">v{{ app_version }}</span>
+            </div>
+            <nav class="site-nav" aria-label="Main navigation">
+                <a class="nav-link {% if active_nav == "dashboard" %}active{% endif %}" href="/">Dashboard</a>
+                <a class="nav-link {% if active_nav == "feeds" %}active{% endif %}" href="/feeds">Feeds</a>
+                <a class="nav-link {% if active_nav == "articles" %}active{% endif %}" href="/articles">Articles</a>
+                <a class="nav-link {% if active_nav == "editions" %}active{% endif %}" href="/editions">Editions</a>
+                <a class="nav-link {% if active_nav == "settings" %}active{% endif %}" href="/settings">Settings</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="site-footer">
+        Quire v{{ app_version }} &middot; Self-hosted RSS Aggregation &amp; Publication Foundation
+    </footer>
+</body>
+</html>

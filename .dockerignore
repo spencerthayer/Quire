@@ -1,0 +1,33 @@
+# Git and editor metadata
+.git/
+.github/
+.agents/
+.cursor
+.vscode/
+.idea/
+*.code-workspace
+
+# Reference repositories and local data
+repos/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Documentation not needed inside the container build context
+docs/
+README.md
+AGENTS.md

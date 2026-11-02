@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}Feeds | Quire{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Feeds</h1>
+    <p>Configure RSS and Atom feeds persisted in SQLite. Automatic background polling is scheduled for Phase 2.</p>
+</div>
+
+{% match flash_message %}
+{% when Some with (msg) %}
+<div class="alert alert-success" role="status">{{ msg }}</div>
+{% when None %}
+{% endmatch %}
+
+{% match error_message %}
+{% when Some with (err) %}
+<div class="alert alert-error" role="alert">{{ err }}</div>
+{% when None %}
+{% endmatch %}
+
+<div class="card">
+    <h2>Add Feed</h2>
+    <form method="post" action="/feeds">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-grid">
+            <div class="form-group">
+                <label for="name">Feed Name *</label>
+                <input id="name" name="name" type="text" required maxlength="200" placeholder="Ars Technica" value="{{ form_name }}">
+            </div>
+            <div class="form-group">
+                <label for="feed_url">Feed URL (RSS/Atom) *</label>
+                <input id="feed_url" name="feed_url" type="url" required maxlength="2048" placeholder="https://feeds.arstechnica.com/arstechnica/index" value="{{ form_feed_url }}">
+            </div>
+            <div class="form-group">
+                <label for="website_url">Website URL (optional)</label>
+                <input id="website_url" name="website_url" type="url" maxlength="2048" placeholder="https://arstechnica.com" value="{{ form_website_url }}">
+            </div>
+            <div class="form-group">
+                <label for="description">Description (optional)</label>
+                <input id="description" name="description" type="text" maxlength="1000" placeholder="Technology news and analysis" value="{{ form_description }}">
+            </div>
+        </div>
+        <div class="checkbox-row">
+            <input id="enabled" name="enabled" type="checkbox" value="true" {% if form_enabled %}checked{% endif %}>
+            <label for="enabled">Enable feed immediately</label>
+        </div>
+        <button class="btn btn-primary" type="submit">Add Feed</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Configured Feeds ({{ feeds.len() }})</h2>
+    {% if feeds.is_empty() %}
+    <div class="empty-state">
+        <p>No feeds configured yet. Add your first RSS or Atom feed above.</p>
+    </div>
+    {% else %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Feed URL</th>
+                    <th>Status</th>
+                    <th>Last Fetch</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for feed in feeds %}
+                <tr>
+                    <td>
+                        <strong>{{ feed.name }}</strong>
+                        {% match feed.website_url %}
+                        {% when Some with (site) %}
+                        <div><a class="mono" href="{{ site }}" target="_blank" rel="noopener noreferrer">{{ site }}</a></div>
+                        {% when None %}
+                        {% endmatch %}
+                        {% match feed.description %}
+                        {% when Some with (desc) %}
+                        <div class="form-help">{{ desc }}</div>
+                        {% when None %}
+                        {% endmatch %}
+                    </td>
+                    <td class="mono">{{ feed.feed_url }}</td>
+                    <td>
+                        {% if feed.enabled %}
+                        <span class="badge badge-enabled">Enabled</span>
+                        {% else %}
+                        <span class="badge badge-disabled">Disabled</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% match feed.last_successful_fetch_at %}
+                        {% when Some with (ts) %}
+                        <span class="mono">{{ ts }}</span>
+                        {% when None %}
+                        <span class="form-help">Never fetched</span>
+                        {% endmatch %}
+                        {% match feed.last_error %}
+                        {% when Some with (err) %}
+                        <div class="alert-error mono">{{ err }}</div>
+                        {% when None %}
+                        {% endmatch %}
+                    </td>
+                    <td>
+                        <div class="actions-cell">
+                            <a class="btn btn-secondary btn-sm" href="/feeds/{{ feed.id }}/edit">Edit</a>
+                            <form class="inline-form" method="post" action="/feeds/{{ feed.id }}/toggle">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <button class="btn btn-secondary btn-sm" type="submit">
+                                    {% if feed.enabled %}Disable{% else %}Enable{% endif %}
+                                </button>
+                            </form>
+                            <form class="inline-form" method="post" action="/feeds/{{ feed.id }}/delete" onsubmit="return confirm('Delete feed {{ feed.name }}? This will also remove any stored articles for this feed.');">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <input type="hidden" name="confirm" value="yes">
+                                <button class="btn btn-danger btn-sm" type="submit">Delete</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

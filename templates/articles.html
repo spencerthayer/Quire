@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Articles | Quire{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Articles</h1>
+    <p>Collected articles stored in SQLite. Feed polling and full-text extraction are scheduled for Phase 2.</p>
+</div>
+
+<div class="card">
+    <h2>Stored Articles ({{ articles.len() }})</h2>
+    {% if articles.is_empty() %}
+    <div class="empty-state">
+        <p>No articles stored in the database yet.</p>
+        <p class="form-help">Once RSS ingestion is enabled in Phase 2, collected articles will appear here.</p>
+    </div>
+    {% else %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Title</th>
+                    <th>Feed</th>
+                    <th>Author</th>
+                    <th>Published (UTC)</th>
+                    <th>Extraction Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for article in articles %}
+                <tr>
+                    <td>
+                        <a href="{{ article.canonical_url }}" target="_blank" rel="noopener noreferrer"><strong>{{ article.title }}</strong></a>
+                        {% match article.description %}
+                        {% when Some with (desc) %}
+                        <div class="form-help">{{ desc }}</div>
+                        {% when None %}
+                        {% endmatch %}
+                    </td>
+                    <td>{{ article.feed_name }}</td>
+                    <td>
+                        {% match article.author %}
+                        {% when Some with (author) %}
+                        {{ author }}
+                        {% when None %}
+                        <span class="form-help">&mdash;</span>
+                        {% endmatch %}
+                    </td>
+                    <td class="mono">
+                        {% match article.published_at %}
+                        {% when Some with (pub_at) %}
+                        {{ pub_at }}
+                        {% when None %}
+                        {{ article.discovered_at }}
+                        {% endmatch %}
+                    </td>
+                    <td><span class="badge badge-disabled">{{ article.extraction_status }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
