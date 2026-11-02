@@ -1,0 +1,8 @@
+services:
+  quire:
+    container_name: quire-review
+    image: quire:review
+    environment:
+      QUIRE_FETCH_ENABLED: "false"
+    ports: !override
+      - "18080:8080"
