@@ -389,9 +389,7 @@ async fn execute_single_fetch(
                 // Validate every resolved IP inside the fetcher regardless of which
                 // HostResolver implementation returned it.
                 for addr in &addrs {
-                    if !is_public_unicast(&addr.ip())
-                        && !resolver.allows_test_fixture_addr(addr)
-                    {
+                    if !is_public_unicast(&addr.ip()) && !resolver.allows_test_fixture_addr(addr) {
                         return Err((
                             FetchError::new(
                                 FetchErrorCategory::SsrfBlocked,
@@ -562,8 +560,8 @@ async fn execute_single_fetch(
             })?;
 
             // Enforcement Point 3: Validate redirect target against full URL + SSRF policy
-            let validated_next =
-                parse_and_validate_http_url(joined.as_str(), "Redirect URL").map_err(|e| {
+            let validated_next = parse_and_validate_http_url(joined.as_str(), "Redirect URL")
+                .map_err(|e| {
                     let msg = e.to_string();
                     let cat = if msg.contains("cannot target") || msg.contains("restricted") {
                         FetchErrorCategory::SsrfBlocked

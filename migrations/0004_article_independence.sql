@@ -1,4 +1,3 @@
--- no-transaction
 -- Quire Phase 2 Remediation Migration 0004:
 -- Rebuild `articles` following SQLite's 12-step procedure so that:
 --   1. `articles.feed_id` is nullable with `ON DELETE SET NULL` (QUA-007: articles
@@ -8,13 +7,12 @@
 --      the sole GUID authority and feed deletion cannot fail on GUID collisions
 --      (QUA-006 / TRP-012).
 --
--- CRITICAL: `PRAGMA foreign_keys = OFF` is executed BEFORE `BEGIN` so `DROP TABLE articles`
--- does not trigger cascading deletes into `edition_articles`, `article_feed_sources`,
--- or `article_extraction_jobs`.
-
-PRAGMA foreign_keys = OFF;
-
-BEGIN;
+-- sqlx 0.8 SQLite runs every migration inside its own transaction and ignores
+-- `-- no-transaction`; `PRAGMA foreign_keys` is a no-op inside a transaction.
+-- `db::run_migrations` therefore applies migrations on a dedicated connection
+-- opened with `foreign_keys = OFF`, so `DROP TABLE articles` cannot cascade into
+-- `edition_articles`, `article_feed_sources`, or `article_extraction_jobs`.
+-- Never apply this file on a connection with foreign keys ON.
 
 CREATE TABLE articles_new (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,7 +118,3 @@ UPDATE articles
 SET feed_id = NULL
 WHERE feed_id IS NOT NULL
   AND feed_id NOT IN (SELECT id FROM feeds);
-
-COMMIT;
-
-PRAGMA foreign_keys = ON;

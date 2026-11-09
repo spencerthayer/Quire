@@ -41,7 +41,10 @@ pub enum ExtractionResult {
 /// represents HTML or XHTML suitable for readability extraction (fixes QUA-014).
 pub fn is_supported_html_response(content_type: Option<&str>, bytes: &[u8]) -> Result<(), String> {
     if bytes.starts_with(b"%PDF-") {
-        return Err("Unsupported article Content-Type: PDF document cannot be extracted as HTML.".to_string());
+        return Err(
+            "Unsupported article Content-Type: PDF document cannot be extracted as HTML."
+                .to_string(),
+        );
     }
 
     if let Some(raw_ct) = content_type {

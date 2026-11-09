@@ -401,14 +401,9 @@ async fn upsert_single_entry(
                 entry_updated_changed || existing_row.extracted_content_type != "html";
             let mut queued = false;
             if should_requeue {
-                queued = enqueue_extraction_job_in_tx(
-                    tx,
-                    existing_row.id,
-                    "auto",
-                    max_attempts,
-                    false,
-                )
-                .await?;
+                queued =
+                    enqueue_extraction_job_in_tx(tx, existing_row.id, "auto", max_attempts, false)
+                        .await?;
             }
             return Ok(EntryUpsertOutcome::Updated { queued });
         }
@@ -557,11 +552,10 @@ pub async fn enqueue_manual_article_extraction(
 ) -> AppResult<bool> {
     with_write_retry(pool, |tx| {
         Box::pin(async move {
-            let exists: Option<(i64,)> =
-                sqlx::query_as("SELECT id FROM articles WHERE id = ?")
-                    .bind(article_id)
-                    .fetch_optional(&mut **tx)
-                    .await?;
+            let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM articles WHERE id = ?")
+                .bind(article_id)
+                .fetch_optional(&mut **tx)
+                .await?;
             if exists.is_none() {
                 return Err(AppError::NotFound(format!(
                     "Article with ID {article_id} was not found."

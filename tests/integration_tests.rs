@@ -449,12 +449,15 @@ fn test_feed_parsing_rss_atom_rdf_and_edge_cases() {
     .expect("parse latin1");
     assert_eq!(parsed_latin1.entries[0].title, "Café Story");
 
-    // 6. Reject invalid XML and XXE `<!ENTITY` declarations
+    // 6. Reject invalid XML; external entities are never expanded
     assert!(parse_feed_bytes(b"not xml at all", None, &base_url, 200).is_err());
     let xxe_xml = br#"<?xml version="1.0"?>
     <!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
     <rss version="2.0"><channel><title>&xxe;</title></channel></rss>"#;
-    assert!(parse_feed_bytes(xxe_xml, None, &base_url, 200).is_err());
+    let parsed_xxe =
+        parse_feed_bytes(xxe_xml, None, &base_url, 200).expect("XXE feed parses inertly");
+    assert_eq!(parsed_xxe.metadata.title.as_deref(), Some("&xxe;"));
+    assert!(parsed_xxe.entries.is_empty());
 }
 
 #[test]
@@ -1367,4 +1370,140 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
     assert_eq!(counts_restarted.extracted_articles, 1);
     assert_eq!(counts_restarted.fallback_articles, 1);
     pool_restarted.close().await;
+}
+
+async fn migration_snapshot(pool: &sqlx::SqlitePool) -> (Vec<i64>, Vec<(i64, i64, i64)>) {
+    let mut counts = Vec::new();
+    for table in [
+        "feeds",
+        "articles",
+        "article_feed_sources",
+        "article_extraction_jobs",
+        "editions",
+        "edition_articles",
+        "settings",
+    ] {
+        let sql = format!("SELECT count(*) FROM {table}");
+        let (n,): (i64,) = sqlx::query_as(&sql).fetch_one(pool).await.unwrap();
+        counts.push(n);
+    }
+    let members = sqlx::query_as(
+        "SELECT edition_id, article_id, position FROM edition_articles ORDER BY edition_id, article_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    (counts, members)
+}
+
+#[tokio::test]
+async fn test_migration_0004_preserves_child_rows_and_rolls_back_on_failure() {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let tmp = TempDir::new().unwrap();
+    let upto3 = tmp.path().join("upto3");
+    let broken = tmp.path().join("broken");
+    std::fs::create_dir_all(&upto3).unwrap();
+    std::fs::create_dir_all(&broken).unwrap();
+    for name in [
+        "0001_initial_schema.sql",
+        "0002_feed_ingestion.sql",
+        "0003_work_ownership.sql",
+    ] {
+        std::fs::copy(src.join(name), upto3.join(name)).unwrap();
+        std::fs::copy(src.join(name), broken.join(name)).unwrap();
+    }
+    std::fs::write(
+        broken.join("0004_article_independence.sql"),
+        "CREATE TABLE articles_new (id INTEGER PRIMARY KEY);\n\
+         INSERT INTO articles_new (id, no_such_column) SELECT id, id FROM articles;\n\
+         DROP TABLE articles;\n",
+    )
+    .unwrap();
+
+    let db_path = tmp.path().join("quire.db");
+    let url = format!("sqlite://{}", db_path.display());
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true)
+        .foreign_keys(true);
+
+    let upto3_migrator = sqlx::migrate::Migrator::new(upto3.as_path()).await.unwrap();
+    db::run_migrations(&upto3_migrator, &options).await.unwrap();
+    let seed_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .unwrap();
+    for sql in [
+        "INSERT INTO feeds (id, name, feed_url) VALUES (1, 'A', 'https://a.example/f'), (2, 'B', 'https://b.example/f')",
+        "INSERT INTO articles (id, feed_id, canonical_url, title, extracted_content, extraction_status, extracted_content_type) VALUES (1, 1, 'https://a.example/1', 'one', '<p>x</p>', 'extracted', 'html'), (2, 1, 'https://a.example/2', 'two', NULL, 'pending', 'none'), (3, 2, 'https://b.example/3', 'three', NULL, 'pending', 'none')",
+        "INSERT INTO article_feed_sources (article_id, feed_id, external_guid) VALUES (1, 1, 'g1'), (2, 1, 'g2'), (3, 2, 'g3')",
+        "INSERT OR IGNORE INTO article_extraction_jobs (article_id, status) VALUES (2, 'queued'), (3, 'queued')",
+        "INSERT INTO editions (id, title, publication_date) VALUES (1, 'E', '2026-11-01')",
+        "INSERT INTO edition_articles (edition_id, article_id, position) VALUES (1, 1, 0), (1, 3, 1)",
+        "INSERT INTO settings (key, value) VALUES ('fetch_interval_minutes', '60')",
+    ] {
+        sqlx::query(sql).execute(&seed_pool).await.unwrap();
+    }
+    let before = migration_snapshot(&seed_pool).await;
+    assert_eq!(before.0, vec![2, 3, 3, 2, 1, 2, 1]);
+    seed_pool.close().await;
+
+    let broken_migrator = sqlx::migrate::Migrator::new(broken.as_path())
+        .await
+        .unwrap();
+    assert!(
+        db::run_migrations(&broken_migrator, &options)
+            .await
+            .is_err()
+    );
+    let check_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .unwrap();
+    assert_eq!(migration_snapshot(&check_pool).await, before);
+    let (max_version,): (i64,) = sqlx::query_as("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&check_pool)
+        .await
+        .unwrap();
+    assert_eq!(max_version, 3);
+    check_pool.close().await;
+
+    let pool = db::init_pool(&url, tmp.path()).await.expect("0004 applies");
+    assert_eq!(migration_snapshot(&pool).await, before);
+    let (fk_on,): (i64,) = sqlx::query_as("PRAGMA foreign_keys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(fk_on, 1);
+    let (feed_id_notnull,): (i64,) = sqlx::query_as(
+        "SELECT \"notnull\" FROM pragma_table_info('articles') WHERE name = 'feed_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(feed_id_notnull, 0);
+    let indexes: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_index_list('articles') ORDER BY name")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let indexes: Vec<String> = indexes.into_iter().map(|r| r.0).collect();
+    assert_eq!(
+        indexes,
+        vec![
+            "idx_articles_canonical_url",
+            "idx_articles_content_hash",
+            "idx_articles_discovered_at",
+            "idx_articles_extraction_retry",
+            "idx_articles_extraction_status",
+            "idx_articles_feed_id",
+            "idx_articles_published_at",
+        ]
+    );
+    pool.close().await;
+
+    let pool = db::init_pool(&url, tmp.path()).await.expect("restart");
+    assert_eq!(migration_snapshot(&pool).await, before);
 }

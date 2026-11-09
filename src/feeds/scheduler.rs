@@ -191,8 +191,7 @@ impl IngestionCoordinator {
     /// synchronously.
     pub async fn run_feed_now_and_wait(&self, feed_id: i64, trigger_type: &str) -> AppResult<bool> {
         let _ = get_feed_by_id(&self.pool, feed_id).await?;
-        let Some((feed, run_id)) =
-            try_claim_feed_fetch(&self.pool, feed_id, trigger_type).await?
+        let Some((feed, run_id)) = try_claim_feed_fetch(&self.pool, feed_id, trigger_type).await?
         else {
             return Ok(false);
         };
@@ -239,9 +238,7 @@ impl IngestionCoordinator {
                 let coord = self.clone();
                 let cfg_clone = rt_cfg.clone();
                 let abort_handle: AbortHandle = active.spawn(async move {
-                    let reason = coord
-                        .run_extraction_with_deadline(job, &cfg_clone)
-                        .await;
+                    let reason = coord.run_extraction_with_deadline(job, &cfg_clone).await;
                     (meta, reason)
                 });
                 active_meta.insert(abort_handle.id(), meta_for_map);
@@ -287,9 +284,7 @@ impl IngestionCoordinator {
             let coord = self.clone();
             let cfg_clone = rt_cfg.clone();
             let abort_handle = active.spawn(async move {
-                let reason = coord
-                    .run_feed_with_deadline(feed, run_id, &cfg_clone)
-                    .await;
+                let reason = coord.run_feed_with_deadline(feed, run_id, &cfg_clone).await;
                 (meta, reason)
             });
             active_meta.insert(abort_handle.id(), meta_for_map);
@@ -323,12 +318,12 @@ impl IngestionCoordinator {
                 "scheduler_started"
             );
 
-            let feed_handle = tokio::spawn(async move {
-                feed_coord.run_feed_dispatcher_loop(poll).await
-            });
-            let extract_handle = tokio::spawn(async move {
-                extract_coord.run_extraction_dispatcher_loop(poll).await
-            });
+            let feed_handle =
+                tokio::spawn(async move { feed_coord.run_feed_dispatcher_loop(poll).await });
+            let extract_handle =
+                tokio::spawn(
+                    async move { extract_coord.run_extraction_dispatcher_loop(poll).await },
+                );
 
             let (f_res, e_res) = tokio::join!(feed_handle, extract_handle);
             let f_clean = f_res.unwrap_or(false);
@@ -371,9 +366,8 @@ impl IngestionCoordinator {
                             let coord = self.clone();
                             let cfg_clone = rt_cfg.clone();
                             let abort_handle = active.spawn(async move {
-                                let reason = coord
-                                    .run_feed_with_deadline(feed, run_id, &cfg_clone)
-                                    .await;
+                                let reason =
+                                    coord.run_feed_with_deadline(feed, run_id, &cfg_clone).await;
                                 (meta, reason)
                             });
                             active_meta.insert(abort_handle.id(), meta_for_map);
@@ -457,9 +451,8 @@ impl IngestionCoordinator {
                             let coord = self.clone();
                             let cfg_clone = rt_cfg.clone();
                             let abort_handle = active.spawn(async move {
-                                let reason = coord
-                                    .run_extraction_with_deadline(job, &cfg_clone)
-                                    .await;
+                                let reason =
+                                    coord.run_extraction_with_deadline(job, &cfg_clone).await;
                                 (meta, reason)
                             });
                             active_meta.insert(abort_handle.id(), meta_for_map);
@@ -518,7 +511,10 @@ impl IngestionCoordinator {
 
     async fn handle_finished_feed(
         &self,
-        join_res: Result<(tokio::task::Id, (ActiveFeedMeta, TaskEndReason)), tokio::task::JoinError>,
+        join_res: Result<
+            (tokio::task::Id, (ActiveFeedMeta, TaskEndReason)),
+            tokio::task::JoinError,
+        >,
         active_meta: &mut HashMap<tokio::task::Id, ActiveFeedMeta>,
     ) {
         match join_res {
@@ -813,10 +809,7 @@ impl IngestionCoordinator {
             }) => {
                 info!(
                     feed_id = feed.id,
-                    run_id,
-                    http_status,
-                    duration_ms,
-                    "feed_fetch_completed (unchanged 304)"
+                    run_id, http_status, duration_ms, "feed_fetch_completed (unchanged 304)"
                 );
                 match complete_feed_fetch_run(
                     &self.pool,

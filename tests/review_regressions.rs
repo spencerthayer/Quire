@@ -51,6 +51,25 @@ impl HostResolver for AnyHost {
     }
 }
 
+/// Resolver that maps every hostname to the local fixture and permits exactly
+/// that fixture address through the fetcher's test hook (models a public DNS
+/// answer for tests that must reach the fixture).
+struct FixtureHost(SocketAddr);
+impl HostResolver for FixtureHost {
+    fn resolve<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = AppResult<Vec<SocketAddr>>> + Send + 'a>> {
+        let a = self.0;
+        Box::pin(async move { Ok(vec![a]) })
+    }
+
+    fn allows_test_fixture_addr(&self, addr: &SocketAddr) -> bool {
+        *addr == self.0
+    }
+}
+
 async fn state_with(
     resolver: Arc<dyn HostResolver>,
     extra: &[(&str, &str)],
@@ -247,7 +266,7 @@ fn opts() -> FetchRequestOptions {
 #[ignore = "QUA-012: AnyHost 127.0.0.1 peer/resolver check added in Stage 8"]
 async fn r01_redirects_to_restricted_literals_are_blocked() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let port = fx.addr.port();
     for path in [
         "/r-loop",
@@ -320,7 +339,7 @@ async fn r04_fetcher_trusts_resolver_output() {
 #[tokio::test]
 async fn r05_gzip_bomb_is_bounded_by_decompressed_limit() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let mut o = opts();
     o.max_response_bytes = 1024 * 1024;
     o.request_timeout = Duration::from_secs(20);
@@ -337,7 +356,7 @@ async fn r05_gzip_bomb_is_bounded_by_decompressed_limit() {
 #[tokio::test]
 async fn r06_slow_drip_body_times_out() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let mut o = opts();
     o.request_timeout = Duration::from_secs(2);
     let t = Instant::now();
@@ -349,6 +368,7 @@ async fn r06_slow_drip_body_times_out() {
     .await;
     let el = t.elapsed();
     assert!(res.is_err());
+    assert_eq!(res.unwrap_err().category, FetchErrorCategory::Timeout);
     assert!(el < Duration::from_secs(4), "timeout not enforced: {el:?}");
 }
 
@@ -481,7 +501,7 @@ fn r12_sanitizer_blocks_xss_vectors() {
 #[ignore = "QUA-002: fixed in Stage 6"]
 async fn r13_transient_article_failure_with_summary_is_retried_not_finalized() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let url = format!("http://pub.example.com:{}/a503", fx.addr.port());
     let res = fetch_and_extract_article(&url, Some("Feed summary text"), &opts(), &resolver).await;
     assert!(
@@ -500,7 +520,7 @@ async fn r13_transient_article_failure_with_summary_is_retried_not_finalized() {
 #[ignore = "QUA-002: fixed in Stage 6"]
 async fn r14_transient_failure_end_to_end_queue_state() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let (_t, st) = state_with(
         resolver,
         &[
@@ -533,7 +553,7 @@ async fn r14_transient_failure_end_to_end_queue_state() {
 #[ignore = "QUA-014: fixed in Stage 6"]
 async fn r15_non_html_content_type_not_marked_full_text() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let url = format!("http://pub.example.com:{}/pdf", fx.addr.port());
     let res = fetch_and_extract_article(&url, None, &opts(), &resolver).await;
     assert!(
@@ -625,6 +645,9 @@ async fn r17_concurrent_feed_persists_with_queue_writes_do_not_fail() {
                         &ExtractionResult::Failed {
                             error_message: "x".into(),
                             retryable: false,
+                            retry_after: None,
+                            interim_fallback: None,
+                            cancelled: false,
                         },
                     )
                     .await;
@@ -731,6 +754,9 @@ async fn r19_stale_worker_cannot_overwrite_reclaimed_job() {
         &ExtractionResult::Failed {
             error_message: "stale".into(),
             retryable: false,
+            retry_after: None,
+            interim_fallback: None,
+            cancelled: false,
         },
     )
     .await;
@@ -840,7 +866,7 @@ async fn r22_feed_delete_reassignment_guid_conflict() {
 #[ignore = "QUA-003: fixed in Stage 3"]
 async fn r23_manual_fetch_all_respects_fetch_concurrency() {
     let fx = spawn_fixture().await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(fx.addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(fx.addr));
     let (_t, st) = state_with(
         resolver,
         &[
@@ -923,7 +949,7 @@ async fn r25_scheduler_tick_e2e_concurrent_feeds() {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(addr));
     let (_t, st) = state_with(
         resolver,
         &[
@@ -1063,7 +1089,7 @@ async fn big_feed_fixture(entries: u32) -> SocketAddr {
 #[ignore = "QUA-001: fixed in Stage 2"]
 async fn r29_production_tick_and_fetch_all_contention() {
     let addr = big_feed_fixture(30).await;
-    let resolver: Arc<dyn HostResolver> = Arc::new(AnyHost(addr));
+    let resolver: Arc<dyn HostResolver> = Arc::new(FixtureHost(addr));
     let (_tmp, st) = state_with(resolver, &[("QUIRE_EXTRACTION_CONCURRENCY", "1")]).await;
     for n in 0..12 {
         new_feed(

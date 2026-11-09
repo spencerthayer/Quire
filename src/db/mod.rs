@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use rand::Rng;
 use serde::Serialize;
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
+use sqlx::{ConnectOptions, Connection, FromRow, Sqlite, SqlitePool, Transaction};
 use tracing::{debug, info, warn};
 
 use crate::error::{AppError, AppResult};
@@ -107,7 +108,10 @@ where
                 Ok(()) => {
                     let tx_ms = started.elapsed().as_millis() as u64;
                     if tx_ms > 2_000 {
-                        warn!(tx_ms, attempt, "SQLite immediate transaction exceeded 2000ms budget");
+                        warn!(
+                            tx_ms,
+                            attempt, "SQLite immediate transaction exceeded 2000ms budget"
+                        );
                     } else {
                         debug!(tx_ms, attempt, "SQLite immediate transaction committed");
                     }
@@ -143,6 +147,21 @@ async fn sleep_with_jitter(base_ms: u64) {
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 }
 
+/// Apply `migrator` on a dedicated connection opened with `foreign_keys = OFF`.
+///
+/// sqlx 0.8 SQLite wraps every migration in a transaction and ignores
+/// `-- no-transaction`, and `PRAGMA foreign_keys` is a no-op inside a
+/// transaction. Table rebuilds (migration 0004) would otherwise cascade-delete
+/// child rows. This connection never enters the pool.
+pub async fn run_migrations(migrator: &Migrator, options: &SqliteConnectOptions) -> AppResult<()> {
+    let mut conn = options.clone().foreign_keys(false).connect().await?;
+    let migrate_result = migrator.run(&mut conn).await;
+    let close_result = conn.close().await;
+    migrate_result?;
+    close_result?;
+    Ok(())
+}
+
 /// Initialize the SQLite connection pool with WAL mode and foreign keys enabled,
 /// create parent directories when using a file-backed database, run embedded
 /// versioned SQLx migrations, and verify `PRAGMA foreign_key_check` and
@@ -174,13 +193,13 @@ pub async fn init_pool(database_url: &str, data_dir: &Path) -> AppResult<SqliteP
         .foreign_keys(true)
         .busy_timeout(Duration::from_secs(10));
 
+    run_migrations(&sqlx::migrate!("./migrations"), &connect_options).await?;
+
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .acquire_timeout(Duration::from_secs(10))
         .connect_with(connect_options)
         .await?;
-
-    sqlx::migrate!("./migrations").run(&pool).await?;
 
     verify_database_integrity(&pool).await?;
 
@@ -285,16 +304,14 @@ pub async fn get_dashboard_counts(pool: &SqlitePool) -> AppResult<DashboardCount
     )
     .fetch_one(pool)
     .await?;
-    let (pending_extractions,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM article_extraction_jobs WHERE status = 'queued'",
-    )
-    .fetch_one(pool)
-    .await?;
-    let (processing_extractions,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM article_extraction_jobs WHERE status = 'processing'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let (pending_extractions,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM article_extraction_jobs WHERE status = 'queued'")
+            .fetch_one(pool)
+            .await?;
+    let (processing_extractions,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM article_extraction_jobs WHERE status = 'processing'")
+            .fetch_one(pool)
+            .await?;
     let (failed_extractions,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*)
          FROM articles a

@@ -1457,18 +1457,14 @@ fn map_flash_code(code: Option<&str>) -> Option<String> {
         Some("updated") => Some("Feed updated.".to_string()),
         Some("toggled") => Some("Feed status updated.".to_string()),
         Some("deleted") => Some("Feed deleted.".to_string()),
-        Some("fetch_started") => {
-            Some("Manual feed fetch request accepted and queued.".to_string())
-        }
+        Some("fetch_started") => Some("Manual feed fetch request accepted and queued.".to_string()),
         Some("fetch_already_running") => {
             Some("A fetch is already running for this feed.".to_string())
         }
         Some("fetch_all_started") => {
             Some("Manual fetch request accepted for all enabled feeds.".to_string())
         }
-        Some("extraction_queued") => {
-            Some("Article content extraction queued.".to_string())
-        }
+        Some("extraction_queued") => Some("Article content extraction queued.".to_string()),
         Some("extraction_already_running") => {
             Some("Article extraction is already in progress.".to_string())
         }
