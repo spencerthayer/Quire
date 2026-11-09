@@ -1151,8 +1151,20 @@ async fn spawn_e2e_fixture_server() -> SocketAddr {
     addr
 }
 
-#[tokio::test]
-async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
+struct E2eReady {
+    temp_dir: TempDir,
+    state: AppState,
+    app: Router,
+    cookie_pair: String,
+    csrf_token: String,
+    feed_id: i64,
+    feeds_status: StatusCode,
+    create_status: StatusCode,
+    feeds_ran: usize,
+    extractions_ran: usize,
+}
+
+async fn e2e_after_first_tick() -> E2eReady {
     let fixture_addr = spawn_e2e_fixture_server().await;
     let resolver = FixtureResolver::new_local_fixture("fixture.example.com", fixture_addr);
 
@@ -1162,7 +1174,6 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
     let (temp_dir, state) = setup_test_state_with_resolver(resolver.clone(), extra_env).await;
     let app = create_router(state.clone());
 
-    // 1. Obtain CSRF cookie from GET /feeds
     let feeds_get = app
         .clone()
         .oneshot(
@@ -1173,7 +1184,7 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(feeds_get.status(), StatusCode::OK);
+    let feeds_status = feeds_get.status();
     let set_cookie = feeds_get
         .headers()
         .get(header::SET_COOKIE)
@@ -1184,7 +1195,6 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
     let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
     let csrf_token = cookie_pair.split('=').nth(1).unwrap().to_string();
 
-    // 2. Add a feed pointing to the local HTTP fixture server via POST /feeds
     let feed_url = format!(
         "http://fixture.example.com:{}/feed.xml",
         fixture_addr.port()
@@ -1207,22 +1217,42 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
         )
         .await
         .unwrap();
-    assert_eq!(create_resp.status(), StatusCode::SEE_OTHER);
+    let create_status = create_resp.status();
 
     let configured_feeds = feeds::list_feeds(&state.db).await.unwrap();
-    assert_eq!(configured_feeds.len(), 1);
     let feed_id = configured_feeds[0].id;
-
-    // 3. Execute scheduler tick (fetches due feed + drains SQLite extraction queue)
     let (feeds_ran, extractions_ran) = state.coordinator.run_scheduler_tick().await.unwrap();
-    assert_eq!(feeds_ran, 1);
-    assert_eq!(extractions_ran, 2);
 
-    // 4. Verify persisted articles and full-text vs fallback extraction
+    E2eReady {
+        temp_dir,
+        state,
+        app,
+        cookie_pair,
+        csrf_token,
+        feed_id,
+        feeds_status,
+        create_status,
+        feeds_ran,
+        extractions_ran,
+    }
+}
+
+#[tokio::test]
+async fn test_end_to_end_feed_create_and_extraction() {
+    let ready = e2e_after_first_tick().await;
+    assert_eq!(ready.feeds_status, StatusCode::OK);
+    assert_eq!(ready.create_status, StatusCode::SEE_OTHER);
+
+    let configured_feeds = feeds::list_feeds(&ready.state.db).await.unwrap();
+    assert_eq!(configured_feeds.len(), 1);
+
+    assert_eq!(ready.feeds_ran, 1);
+    assert_eq!(ready.extractions_ran, 2);
+
     let paged = articles::query_articles_paginated(
-        &state.db,
+        &ready.state.db,
         &ArticleFilter {
-            feed_id: Some(feed_id),
+            feed_id: Some(ready.feed_id),
             extraction_status: None,
             published_date: None,
             discovered_date: None,
@@ -1248,9 +1278,32 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
         .find(|a| a.title == "Post With Broken Article Page")
         .expect("fallback article");
     assert_eq!(fallback_art.extraction_status, "fallback");
+}
 
-    // 5. Render GET /articles/{id} and verify sanitized HTML output
-    let detail_resp = app
+#[tokio::test]
+async fn test_end_to_end_article_and_feed_pages() {
+    let ready = e2e_after_first_tick().await;
+    let paged = articles::query_articles_paginated(
+        &ready.state.db,
+        &ArticleFilter {
+            feed_id: Some(ready.feed_id),
+            extraction_status: None,
+            published_date: None,
+            discovered_date: None,
+            page: 1,
+            page_size: 25,
+        },
+    )
+    .await
+    .unwrap();
+    let full_art = paged
+        .items
+        .iter()
+        .find(|a| a.title == "Building Reliable Rust Ingestion Pipelines")
+        .expect("full article");
+
+    let detail_resp = ready
+        .app
         .clone()
         .oneshot(
             Request::builder()
@@ -1274,12 +1327,12 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
     assert!(detail_html.contains("extracted by dom_smoothie from the local fixture server"));
     assert!(!detail_html.contains("untrusted script removed"));
 
-    // 6. Render GET /feeds/{id} and verify fetch history is displayed
-    let feed_detail_resp = app
+    let feed_detail_resp = ready
+        .app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/feeds/{feed_id}"))
+                .uri(format!("/feeds/{}", ready.feed_id))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1299,16 +1352,16 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
     assert!(feed_detail_html.contains("Recent Fetch History"));
     assert!(feed_detail_html.contains("2 seen / +2 new"));
 
-    // 7. Fetch the same feed again via `run_feed_now_and_wait` -> Verify 0 duplicates created
     assert!(
-        state
+        ready
+            .state
             .coordinator
-            .run_feed_now_and_wait(feed_id, "manual")
+            .run_feed_now_and_wait(ready.feed_id, "manual")
             .await
             .unwrap()
     );
     let paged_after = articles::query_articles_paginated(
-        &state.db,
+        &ready.state.db,
         &ArticleFilter {
             feed_id: None,
             extraction_status: None,
@@ -1321,18 +1374,23 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
     .await
     .unwrap();
     assert_eq!(paged_after.total_count, 2);
+}
 
-    // 8. TestPOST /settings attempting to override environment-locked `QUIRE_TIMEZONE` -> 400 Bad Request
-    let locked_settings_resp = app
+#[tokio::test]
+async fn test_end_to_end_settings_lock_and_restart() {
+    let ready = e2e_after_first_tick().await;
+    let locked_settings_resp = ready
+        .app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/settings")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::COOKIE, &cookie_pair)
+                .header(header::COOKIE, &ready.cookie_pair)
                 .body(Body::from(format!(
-                    "csrf_token={csrf_token}&timezone=Europe%2FLondon"
+                    "csrf_token={}&timezone=Europe%2FLondon",
+                    ready.csrf_token
                 )))
                 .unwrap(),
         )
@@ -1340,17 +1398,18 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
         .unwrap();
     assert_eq!(locked_settings_resp.status(), StatusCode::BAD_REQUEST);
 
-    // 9. Test POST /settings updating unlocked `fetch_interval_minutes` -> 303 See Other
-    let valid_settings_resp = app
+    let valid_settings_resp = ready
+        .app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/settings")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::COOKIE, &cookie_pair)
+                .header(header::COOKIE, &ready.cookie_pair)
                 .body(Body::from(format!(
-                    "csrf_token={csrf_token}&fetch_interval_minutes=30&fetch_concurrency=6"
+                    "csrf_token={}&fetch_interval_minutes=30&fetch_concurrency=6",
+                    ready.csrf_token
                 )))
                 .unwrap(),
         )
@@ -1358,10 +1417,9 @@ async fn test_end_to_end_ingestion_extraction_web_routes_and_restart() {
         .unwrap();
     assert_eq!(valid_settings_resp.status(), StatusCode::SEE_OTHER);
 
-    // 10. Simulate application restart by closing pool and re-initializing against the same SQLite file
-    let db_url = state.config.database_url.clone();
-    let data_dir = temp_dir.path().to_path_buf();
-    state.db.close().await;
+    let db_url = ready.state.config.database_url.clone();
+    let data_dir = ready.temp_dir.path().to_path_buf();
+    ready.state.db.close().await;
 
     let pool_restarted = db::init_pool(&db_url, &data_dir).await.unwrap();
     let counts_restarted = db::get_dashboard_counts(&pool_restarted).await.unwrap();
