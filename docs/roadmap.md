@@ -27,16 +27,16 @@ Establish the Rust application architecture, SQLite persistence, web interface, 
 Implement automated and manual feed fetching, article discovery, full-text readability extraction, persistent SQLite job queuing, and deduplication.
 
 ### Required Features
-* [x] Asynchronous HTTP feed fetching (`reqwest`) with strict connect/read timeouts, streaming response size limits, redirect validation, and SSRF IP verification on resolved DNS records.
+* [x] Asynchronous HTTP feed fetching (`reqwest`) with strict connect/read timeouts, streaming response size limits, redirect validation, and a public-unicast allow-list applied to URL literals, every DNS answer, every redirect, and the connected peer. Environment proxies are disabled.
 * [x] Conditional HTTP fetching (`If-None-Match` / `ETag` and `If-Modified-Since` / `Last-Modified` with `304 Not Modified` handling).
-* [x] Bounded exponential backoff retries with jitter and `Retry-After` header support.
+* [x] One article retry budget: the HTTP layer retries only a refused or reset connection (at most 2 tries). Timeouts, 5xx, and 429 are retried by the extraction job, at most 3 attempts, so one article makes at most 6 HTTP requests. `Retry-After` is honored at the job layer. 4xx other than 408 and 429 is terminal.
 * [x] RSS 2.0, RSS 1.0/RDF, and Atom 1.0 parsing using `feed-rs` with character-encoding normalization and XXE/DTD entity rejection.
 * [x] Canonical URL normalization (resolving relative links, stripping fragments, and removing known tracking query parameters such as `utm_*`, `fbclid`, `gclid`).
-* [x] Multi-layered transactional deduplication across feeds using `canonical_url`, `(feed_id, external_guid)`, and `article_feed_sources` cross-feed associations, plus safe feed deletion that preserves shared articles.
+* [x] Deduplication by `canonical_url`. `article_feed_sources (feed_id, external_guid)` is the only GUID key. `articles.feed_id` is a nullable display source. Deleting a feed repoints a shared article, deletes an orphan that is in no edition, and keeps an edition member with `feed_id` NULL.
 * [x] Persistent SQLite extraction queue (`article_extraction_jobs`) with crash recovery, atomic job claiming, and bounded retry schedules.
 * [x] Full-article HTML extraction using `dom_smoothie` with automatic fallback to sanitized feed summaries when extraction fails.
 * [x] HTML sanitization (`ammonia` + `dom_query`) and SHA-256 `content_hash` calculation over normalized text.
-* [x] Background polling scheduler and manual "Fetch Now" / "Fetch All Enabled" triggers in the web UI.
+* [x] One Quire process per data directory (local storage only). Two dispatchers admit work up to the configured concurrency. **Fetch now** and **Fetch all** mark work due and survive a restart. Repeated clicks coalesce.
 * [x] Feed detail view (`GET /feeds/{id}`), execution history (`feed_fetch_runs` with 100-run retention), paginated/filtered article browser (`GET /articles`), and article reader view (`GET /articles/{id}`) with manual extraction retry/refresh.
 
 ### Optional Enhancements (Deferred to Phase 3+)

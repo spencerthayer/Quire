@@ -25,7 +25,7 @@ curl -s -o /dev/null -w "create feed (no csrf cookie): %{http_code}\n" -X POST l
 curl -s -o /dev/null -w "create feed (missing token field): %{http_code}\n" -c "$J" -b "$J" -X POST localhost:18080/feeds --data "name=X&feed_url=https://x.invalid/f"
 curl -s -o /dev/null -w "ssrf feed 169.254: %{http_code}\n" -c "$J" -b "$J" -X POST localhost:18080/feeds --data "csrf_token=$TOK&name=M&feed_url=http://169.254.169.254/latest"
 curl -s -c "$J" -b "$J" -X POST localhost:18080/settings --data "csrf_token=$TOK&fetch_enabled=true" | grep -io "locked by an environment variable[^<]*" | head -1
-curl -s -c "$J" -b "$J" -X POST localhost:18080/settings --data "csrf_token=$TOK&fetch_interval_minutes=120&extraction_concurrency=0" | grep -io "concurrency must[^<]*" | head -1
+curl -s -c "$J" -b "$J" -X POST localhost:18080/settings --data "csrf_token=$TOK&fetch_interval_minutes=120&extraction_concurrency=0" | grep -io "Max Concurrent Extractions must be between 1 and 32." | head -1
 curl -s -o /dev/null -w "settings save valid: %{http_code} -> %{redirect_url}\n" -c "$J" -b "$J" -X POST localhost:18080/settings --data "csrf_token=$TOK&fetch_interval_minutes=120"
 curl -s -o /dev/null -w "GET /articles/999999: %{http_code}\n" localhost:18080/articles/999999
 curl -s -o /dev/null -w "GET /articles?page=0&page_size=100000: %{http_code}\n" "localhost:18080/articles?page=0&page_size=100000"
