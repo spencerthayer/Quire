@@ -198,6 +198,22 @@ pub async fn init_pool(database_url: &str, data_dir: &Path) -> AppResult<SqliteP
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .acquire_timeout(Duration::from_secs(10))
+        .after_release(|conn, _| {
+            Box::pin(async move {
+                // A cancelled `Transaction` only queues ROLLBACK. sqlx can return the
+                // connection to the pool while its transaction depth is still non-zero,
+                // and the next `BEGIN IMMEDIATE` then fails with InvalidSavePointStatement.
+                // `SELECT 1` does not clear that depth. Prove an immediate transaction can
+                // start. If it cannot, close the connection so the pool opens a fresh one.
+                match conn.begin_with("BEGIN IMMEDIATE").await {
+                    Ok(tx) => match tx.rollback().await {
+                        Ok(()) => Ok(true),
+                        Err(_) => Ok(false),
+                    },
+                    Err(_) => Ok(false),
+                }
+            })
+        })
         .connect_with(connect_options)
         .await?;
 
